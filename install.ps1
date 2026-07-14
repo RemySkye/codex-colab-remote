@@ -153,6 +153,10 @@ if ($Authenticate -or $RunSmokeTest) {
     if ($LASTEXITCODE -ne 0) {
         throw 'Colab authentication failed.'
     }
+    & wsl.exe -d $Distro -- sh -lc 'token="$HOME/.config/colab-cli/token.json"; if [ -f "$token" ]; then chmod 600 "$token"; fi'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not secure the cached Colab OAuth token.'
+    }
 }
 
 if ($RunSmokeTest) {
@@ -167,7 +171,16 @@ if ($RunSmokeTest) {
         if ($LASTEXITCODE -ne 0) { throw 'Remote smoke-test execution failed.' }
     }
     finally {
-        if ($created) { & $wrapper stop -s $session }
+        if ($created) {
+            & $wrapper stop -s $session
+            $stopExitCode = $LASTEXITCODE
+            $sessionListing = @(& $wrapper sessions 2>&1)
+            $sessionsExitCode = $LASTEXITCODE
+            $sessionListing | ForEach-Object { Write-Host $_ }
+            if ($stopExitCode -ne 0 -or $sessionsExitCode -ne 0 -or ($sessionListing -join "`n") -match [regex]::Escape($session)) {
+                throw "Smoke-test cleanup could not be verified. Run: & '$wrapper' stop -s $session"
+            }
+        }
     }
 }
 

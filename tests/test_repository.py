@@ -35,6 +35,21 @@ class RepositoryTests(unittest.TestCase):
         self.assertNotIn("/home/" + "administrator", combined)
         self.assertIn("Get-ColabRemoteDistro", combined)
 
+    def test_auth_handoff_uses_private_permissions(self):
+        start = (ROOT / "scripts" / "start_colab_auth.sh").read_text(encoding="utf-8")
+        submit = (ROOT / "scripts" / "submit_colab_auth.sh").read_text(encoding="utf-8")
+        self.assertIn("umask 077", start)
+        self.assertIn("chmod 700", start)
+        self.assertIn("chmod 600", start)
+        self.assertIn("chmod 600", submit)
+        self.assertNotIn("/tmp/colab-auth", start + submit)
+
+    def test_smoke_test_verifies_cleanup(self):
+        installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn("$stopExitCode", installer)
+        self.assertIn("$sessionListing", installer)
+        self.assertIn("cleanup could not be verified", installer)
+
 
 if __name__ == "__main__":
     unittest.main()
