@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "colab-ssh": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${__dirname}/scripts/run_mcp.ps1"]
+    }
+  }
+}

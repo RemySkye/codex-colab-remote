@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Validate repository
+        run: python scripts/validate_repo.py
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            [void][scriptblock]::Create((Get-Content -Raw -LiteralPath $_.FullName))
+          }
+      - name: Check shell scripts
+        shell: bash
+        run: bash -n scripts/*.sh
+      - name: Run tests
+        run: uv run python -m unittest discover -s tests -v

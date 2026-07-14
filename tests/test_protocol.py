@@ -1,0 +1,49 @@
+import sys
+import unittest
+from pathlib import Path
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class ProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def _list_tools(self, parameters):
+        async with stdio_client(parameters) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+        return {tool.name for tool in tools.tools}
+
+    async def test_stdio_handshake_and_tool_listing(self):
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=[str(ROOT / "mcp" / "server.py")],
+            cwd=ROOT,
+        )
+        names = await self._list_tools(parameters)
+        self.assertIn("prepare_session", names)
+        self.assertIn("ssh_exec", names)
+        self.assertIn("start_job", names)
+
+    @unittest.skipUnless(sys.platform == "win32", "PowerShell launcher is Windows-specific")
+    async def test_plugin_powershell_launcher(self):
+        parameters = StdioServerParameters(
+            command="powershell",
+            args=[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ROOT / "scripts" / "run_mcp.ps1"),
+            ],
+            cwd=ROOT,
+        )
+        names = await self._list_tools(parameters)
+        self.assertIn("prepare_session", names)
+
+
+if __name__ == "__main__":
+    unittest.main()
