@@ -1,13 +1,16 @@
 [CmdletBinding()]
 param(
     [string] $Distro = 'Ubuntu',
-    [switch] $Authenticate,
-    [switch] $RunSmokeTest,
-    [switch] $NoOpenPluginPage
+    [switch] $SkipAuthentication,
+    [switch] $RunSmokeTest
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+$Repository = 'RemySkye/codex-colab-remote'
+$Marketplace = 'colab-remote'
+$Plugin = 'colab-ssh'
 
 function Write-Step([string] $Message) {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
@@ -15,9 +18,7 @@ function Write-Step([string] $Message) {
 
 function Get-InstalledDistros {
     $raw = & wsl.exe --list --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        return @()
-    }
+    if ($LASTEXITCODE -ne 0) { return @() }
     return @(
         $raw |
             ForEach-Object { ([string] $_).Replace([string] [char] 0, [string] '').Trim() } |
@@ -26,69 +27,38 @@ function Get-InstalledDistros {
 }
 
 function Install-WindowsUv {
-    $command = Get-Command uv -ErrorAction SilentlyContinue
-    if ($command) {
-        return $command.Source
-    }
-    $candidate = Join-Path $HOME '.local\bin\uv.exe'
-    if (Test-Path -LiteralPath $candidate) {
-        return $candidate
+    if ((Get-Command uv -ErrorAction SilentlyContinue) -or
+        (Test-Path -LiteralPath (Join-Path $HOME '.local\bin\uv.exe'))) {
+        return
     }
 
-    Write-Step 'Installing uv for the local MCP server'
+    Write-Step 'Installing uv on Windows for the plugin MCP server'
     $installer = Join-Path ([IO.Path]::GetTempPath()) 'uv-install.ps1'
     try {
         Invoke-WebRequest -UseBasicParsing -Uri 'https://astral.sh/uv/install.ps1' -OutFile $installer
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
-        if ($LASTEXITCODE -ne 0) {
-            throw 'The uv installer failed.'
-        }
+        if ($LASTEXITCODE -ne 0) { throw 'The Windows uv installer failed.' }
     }
     finally {
         Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
     }
-    if (-not (Test-Path -LiteralPath $candidate)) {
-        throw "uv was installed but not found at $candidate"
-    }
-    return $candidate
 }
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-    throw 'This installer currently targets Windows 10/11. See README.md for Linux and macOS.'
+    throw 'This bootstrap currently supports Windows 10/11 with WSL2.'
 }
 
-$sourceRoot = $PSScriptRoot
-$installRoot = Join-Path $HOME 'plugins\colab-ssh'
-$marketplacePath = Join-Path $HOME '.agents\plugins\marketplace.json'
-
-Write-Step 'Checking WSL2'
+Write-Step 'Checking WSL2 and Ubuntu'
 if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-    throw 'WSL is not installed. Open an Administrator PowerShell, run "wsl --install -d Ubuntu", reboot if requested, then rerun this installer.'
+    throw 'WSL is missing. In Administrator PowerShell run: wsl --install -d Ubuntu. Reboot if requested, finish Ubuntu username setup, then rerun this command.'
 }
-$distros = Get-InstalledDistros
-if ($distros -notcontains $Distro) {
-    Write-Host "WSL distribution '$Distro' is not installed."
-    Write-Host "Run in Administrator PowerShell: wsl --install -d $Distro"
-    Write-Host 'Complete the Linux username setup, then rerun this installer.'
-    exit 10
+if ((Get-InstalledDistros) -notcontains $Distro) {
+    throw "WSL distribution '$Distro' is missing. In Administrator PowerShell run: wsl --install -d $Distro. Finish Linux username setup, then rerun this command."
 }
 
-Write-Step "Installing plugin files at $installRoot"
-if ([IO.Path]::GetFullPath($sourceRoot) -ne [IO.Path]::GetFullPath($installRoot)) {
-    New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
-    $excluded = @('.git', '.venv', '.ruff_cache', '.local', '__pycache__')
-    Get-ChildItem -Force -LiteralPath $sourceRoot |
-        Where-Object { $_.Name -notin $excluded } |
-        ForEach-Object { Copy-Item -Recurse -Force -LiteralPath $_.FullName -Destination $installRoot }
-}
+Install-WindowsUv
 
-$settingsDir = Join-Path $installRoot '.local'
-New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
-@{ wslDistro = $Distro } | ConvertTo-Json | Set-Content -Encoding utf8 -LiteralPath (Join-Path $settingsDir 'settings.json')
-
-[void] (Install-WindowsUv)
-
-Write-Step "Installing Google's official Colab CLI in $Distro"
+Write-Step "Installing uv and Google's official Colab CLI inside $Distro"
 $linuxInstall = @'
 set -euo pipefail
 if [ ! -x "$HOME/.local/bin/uv" ]; then
@@ -104,93 +74,67 @@ else
 fi
 "$HOME/.local/bin/colab" version
 '@
-$linuxBytes = [Text.Encoding]::UTF8.GetBytes($linuxInstall.Replace("`r`n", "`n"))
-$linuxEncoded = [Convert]::ToBase64String($linuxBytes)
-& wsl.exe -d $Distro -- bash -lc "printf %s '$linuxEncoded' | base64 -d | bash"
+$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxInstall.Replace("`r`n", "`n")))
+& wsl.exe -d $Distro -- bash -lc "printf %s '$encoded' | base64 -d | bash"
+if ($LASTEXITCODE -ne 0) { throw 'Installing google-colab-cli inside WSL failed.' }
+
+if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
+    throw 'The Codex CLI was not found. Install or enable Codex CLI, reopen PowerShell, and rerun this command.'
+}
+
+Write-Step 'Adding or refreshing the Codex plugin marketplace'
+& codex plugin marketplace add $Repository
 if ($LASTEXITCODE -ne 0) {
-    throw 'Installing google-colab-cli inside WSL failed.'
-}
-
-Write-Step 'Registering the personal Codex marketplace entry'
-$marketplaceDir = Split-Path -Parent $marketplacePath
-New-Item -ItemType Directory -Force -Path $marketplaceDir | Out-Null
-if (Test-Path -LiteralPath $marketplacePath) {
-    $marketplace = Get-Content -Raw -LiteralPath $marketplacePath | ConvertFrom-Json
-}
-else {
-    $marketplace = [pscustomobject]@{
-        name = 'personal'
-        interface = [pscustomobject]@{ displayName = 'Personal' }
-        plugins = @()
-    }
-}
-if (-not $marketplace.PSObject.Properties['interface']) {
-    $marketplace | Add-Member -NotePropertyName interface -NotePropertyValue ([pscustomobject]@{ displayName = 'Personal' })
-}
-if (-not $marketplace.PSObject.Properties['plugins']) {
-    $marketplace | Add-Member -NotePropertyName plugins -NotePropertyValue @()
-}
-$entry = [pscustomobject]@{
-    name = 'colab-ssh'
-    source = [pscustomobject]@{ source = 'local'; path = './plugins/colab-ssh' }
-    policy = [pscustomobject]@{ installation = 'AVAILABLE'; authentication = 'ON_INSTALL' }
-    category = 'Developer Tools'
-}
-$kept = @($marketplace.plugins | Where-Object { $_.name -ne 'colab-ssh' })
-$marketplace.plugins = @($kept + $entry)
-$marketplace | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 -LiteralPath $marketplacePath
-
-$wrapper = Join-Path $installRoot 'scripts\colab.ps1'
-Write-Step 'Verifying the installed wrapper'
-& $wrapper version
-if ($LASTEXITCODE -ne 0) {
-    throw 'The Colab CLI wrapper verification failed.'
-}
-
-if ($Authenticate -or $RunSmokeTest) {
-    Write-Step 'Authenticating with Google Colab'
-    & $wrapper sessions
+    & codex plugin marketplace upgrade $Marketplace
     if ($LASTEXITCODE -ne 0) {
-        throw 'Colab authentication failed.'
+        throw "Could not add or refresh the '$Marketplace' marketplace."
     }
+}
+
+Write-Step 'Installing or updating the Colab Remote plugin'
+& codex plugin add "$Plugin@$Marketplace"
+if ($LASTEXITCODE -ne 0) { throw 'Codex could not install the Colab Remote plugin.' }
+
+$linuxHome = (& wsl.exe -d $Distro -- sh -lc 'printf %s "$HOME"').Trim()
+if (-not $linuxHome) { throw "Could not discover the Linux home directory in $Distro." }
+$linuxColab = "$linuxHome/.local/bin/colab"
+
+if (-not $SkipAuthentication) {
+    Write-Step 'Authenticating directly with Google Colab'
+    Write-Host 'Follow the Google sign-in link. If Google displays a one-time code, paste it back into this terminal.'
+    & wsl.exe -d $Distro -- $linuxColab sessions
+    if ($LASTEXITCODE -ne 0) { throw 'Google Colab authentication failed.' }
     & wsl.exe -d $Distro -- sh -lc 'token="$HOME/.config/colab-cli/token.json"; if [ -f "$token" ]; then chmod 600 "$token"; fi'
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Could not secure the cached Colab OAuth token.'
-    }
+    if ($LASTEXITCODE -ne 0) { throw 'Could not secure the cached Colab OAuth token.' }
 }
 
 if ($RunSmokeTest) {
-    Write-Step 'Running an optional CPU smoke test'
+    Write-Step 'Creating a temporary CPU runtime for verification'
     $session = 'codex-install-smoke-' + (Get-Random -Minimum 1000 -Maximum 9999)
     $created = $false
     try {
-        & $wrapper new -s $session
+        & wsl.exe -d $Distro -- $linuxColab new -s $session
         if ($LASTEXITCODE -ne 0) { throw 'Could not create the smoke-test session.' }
         $created = $true
-        'print("COLAB_REMOTE_INSTALL_OK")' | & $wrapper exec -s $session --timeout 120
+        'print("COLAB_REMOTE_INSTALL_OK")' | & wsl.exe -d $Distro -- $linuxColab exec -s $session --timeout 120
         if ($LASTEXITCODE -ne 0) { throw 'Remote smoke-test execution failed.' }
     }
     finally {
         if ($created) {
-            & $wrapper stop -s $session
+            & wsl.exe -d $Distro -- $linuxColab stop -s $session
             $stopExitCode = $LASTEXITCODE
-            $sessionListing = @(& $wrapper sessions 2>&1)
+            $sessionListing = @(& wsl.exe -d $Distro -- $linuxColab sessions 2>&1)
             $sessionsExitCode = $LASTEXITCODE
             $sessionListing | ForEach-Object { Write-Host $_ }
             if ($stopExitCode -ne 0 -or $sessionsExitCode -ne 0 -or ($sessionListing -join "`n") -match [regex]::Escape($session)) {
-                throw "Smoke-test cleanup could not be verified. Run: & '$wrapper' stop -s $session"
+                throw "Smoke-test cleanup could not be verified. Run: wsl -d $Distro -- $linuxColab stop -s $session"
             }
         }
     }
 }
 
-if (-not $NoOpenPluginPage) {
-    $encodedMarketplace = [uri]::EscapeDataString($marketplacePath)
-    Start-Process "codex://plugins/colab-ssh?marketplacePath=$encodedMarketplace"
-}
-
-Write-Host "`nColab Remote is ready." -ForegroundColor Green
-Write-Host 'In the Codex plugin page, choose Install or Update, then start a new task.'
-if (-not $Authenticate -and -not $RunSmokeTest) {
-    Write-Host "Authenticate now or on first use: & '$wrapper' sessions"
+Write-Host "`nColab Remote is installed." -ForegroundColor Green
+Write-Host 'Restart Codex or start a new task so it loads the plugin.'
+if ($SkipAuthentication) {
+    Write-Host "Authenticate later with: wsl -d $Distro -- $linuxColab sessions"
 }

@@ -1,6 +1,6 @@
 {
   "name": "colab-ssh",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Operate Google Colab from Codex with Google's official CLI, plus an SSH fallback.",
   "author": {
     "name": "RemySkye",

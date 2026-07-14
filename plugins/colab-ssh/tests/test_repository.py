@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = ROOT.parents[1]
 
 
 class RepositoryTests(unittest.TestCase):
@@ -45,10 +46,23 @@ class RepositoryTests(unittest.TestCase):
         self.assertNotIn("/tmp/colab-auth", start + submit)
 
     def test_smoke_test_verifies_cleanup(self):
-        installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        installer = (REPOSITORY_ROOT / "install.ps1").read_text(encoding="utf-8")
         self.assertIn("$stopExitCode", installer)
         self.assertIn("$sessionListing", installer)
         self.assertIn("cleanup could not be verified", installer)
+
+    def test_repository_is_a_native_codex_marketplace(self):
+        path = REPOSITORY_ROOT / ".agents" / "plugins" / "marketplace.json"
+        marketplace = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(marketplace["name"], "colab-remote")
+        entry = next(item for item in marketplace["plugins"] if item["name"] == "colab-ssh")
+        self.assertEqual(entry["source"]["path"], "./plugins/colab-ssh")
+
+    def test_bootstrap_uses_native_codex_install_commands(self):
+        installer = (REPOSITORY_ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn("plugin marketplace add", installer)
+        self.assertIn('plugin add "$Plugin@$Marketplace"', installer)
+        self.assertIn("$SkipAuthentication", installer)
 
 
 if __name__ == "__main__":

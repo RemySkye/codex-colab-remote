@@ -1,0 +1,20 @@
+{
+  "name": "colab-remote",
+  "interface": {
+    "displayName": "Colab Remote"
+  },
+  "plugins": [
+    {
+      "name": "colab-ssh",
+      "source": {
+        "source": "local",
+        "path": "./plugins/colab-ssh"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

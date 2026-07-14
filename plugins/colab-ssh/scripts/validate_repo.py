@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = ROOT.parents[1]
 IGNORED_PARTS = {".git", ".venv", ".ruff_cache", ".local", "__pycache__"}
 TEXT_SUFFIXES = {".json", ".md", ".ps1", ".py", ".sh", ".toml", ".yaml", ".yml"}
 
@@ -32,7 +33,6 @@ if "colab-ssh" not in mcp_config.get("mcpServers", {}):
     fail("colab-ssh MCP server is missing")
 
 required = [
-    ROOT / "install.ps1",
     ROOT / "scripts" / "colab.ps1",
     ROOT / "scripts" / "runtime.ps1",
     ROOT / "scripts" / "run_mcp.ps1",
@@ -42,12 +42,23 @@ for path in required:
     if not path.exists():
         fail(f"required file is missing: {path.relative_to(ROOT)}")
 
+marketplace_path = REPOSITORY_ROOT / ".agents" / "plugins" / "marketplace.json"
+marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+if marketplace.get("name") != "colab-remote":
+    fail("repository marketplace must be named colab-remote")
+entries = {entry.get("name"): entry for entry in marketplace.get("plugins", [])}
+entry = entries.get("colab-ssh")
+if not entry or entry.get("source", {}).get("path") != "./plugins/colab-ssh":
+    fail("marketplace must expose ./plugins/colab-ssh")
+if not (REPOSITORY_ROOT / "install.ps1").exists():
+    fail("root bootstrap installer is missing")
+
 banned = {
     "C:\\Users\\Administrator": "hardcoded Windows user",
     "/home/administrator": "hardcoded WSL user",
     "4/0A": "possible OAuth authorization code",
 }
-for path in ROOT.rglob("*"):
+for path in REPOSITORY_ROOT.rglob("*"):
     if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
         continue
     if path.resolve() == Path(__file__).resolve():
@@ -57,6 +68,6 @@ for path in ROOT.rglob("*"):
     text = path.read_text(encoding="utf-8")
     for needle, description in banned.items():
         if needle in text:
-            fail(f"{description} found in {path.relative_to(ROOT)}")
+            fail(f"{description} found in {path.relative_to(REPOSITORY_ROOT)}")
 
 print("Repository validation passed.")
