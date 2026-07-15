@@ -214,13 +214,43 @@ class ServerTests(unittest.TestCase):
 
     def test_remote_shell_uses_real_remote_exit_code(self):
         payload = 'CODEX_REMOTE_SHELL={"returncode":7,"stdout":"","stderr":"failed"}\n'
-        with (
-            patch.object(server, "_colab", return_value=completed(payload)) as colab,
-            self.assertRaisesRegex(RuntimeError, "failed"),
-        ):
-            server._remote_shell("test-session", "exit 7")
-        self.assertEqual(colab.call_args.args[0][:3], ["console", "-s", "test-session"])
-        self.assertIn("python3", colab.call_args.kwargs["input_text"])
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(server, "STATE_ROOT", Path(temporary)),
+                patch.object(server, "_wsl_path", side_effect=lambda path: str(path)),
+                patch.object(server, "_colab", return_value=completed(payload)) as colab,
+                self.assertRaisesRegex(RuntimeError, "failed"),
+            ):
+                server._remote_shell("test-session", "exit 7")
+        console_calls = [
+            call
+            for call in colab.call_args_list
+            if call.args[0][:3] == ["console", "-s", "test-session"]
+        ]
+        self.assertEqual(len(console_calls), 1)
+        self.assertIn("python3", console_calls[0].kwargs["input_text"])
+
+    def test_remote_shell_stages_large_payload_with_official_upload(self):
+        payload = 'CODEX_REMOTE_SHELL={"returncode":0,"stdout":"ok","stderr":""}\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(server, "STATE_ROOT", Path(temporary)),
+                patch.object(server, "_wsl_path", side_effect=lambda path: str(path)),
+                patch.object(server, "_colab", return_value=completed(payload)) as colab,
+            ):
+                result = server._remote_shell(
+                    "test-session", "printf %s " + "x" * 12000
+                )
+
+            upload = colab.call_args_list[0]
+            console = colab.call_args_list[1]
+            cleanup = colab.call_args_list[2]
+            self.assertEqual(upload.args[0][0], "upload")
+            self.assertEqual(console.args[0][0], "console")
+            self.assertLess(len(console.kwargs["input_text"]), 300)
+            self.assertEqual(cleanup.args[0][0], "rm")
+            self.assertFalse(list(Path(temporary).glob("remote-shell-*.py")))
+        self.assertEqual(result.stdout, "ok")
 
     def test_memory_probe_retries_new_console_race(self):
         marker = 'CODEX_MEMORY={"bytes":13605830656,"gib":12.67}\n'
@@ -1004,6 +1034,57 @@ class ServerTests(unittest.TestCase):
             result["drive_path"], "MyDrive/codex-colab/runs/checkpoint.bin"
         )
 
+    def test_drive_operation_executes_helper_with_python(self):
+        source = "print('drive helper')\n"
+        remote_result = {
+            "drive_path": "MyDrive/codex-colab/runs/checkpoint.bin"
+        }
+        stdout = server.drive_ops.RESULT_MARKER + server.json.dumps(remote_result)
+        observed = {}
+
+        def execute(arguments, **kwargs):
+            observed["arguments"] = arguments
+            helper = Path(arguments[arguments.index("-f") + 1])
+            observed["source"] = helper.read_text(encoding="utf-8")
+            return completed(stdout=stdout)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(server, "STATE_ROOT", Path(temporary)),
+                patch.object(server, "_secure_state_root"),
+                patch.object(server, "_wsl_path", side_effect=lambda path: str(path)),
+                patch.object(server, "_load_session_ledger", return_value={}),
+                patch.object(server.drive_ops, "remote_script", return_value=source),
+                patch.object(server, "_colab", side_effect=execute),
+            ):
+                result = server._drive_operation(
+                    "test-session", {"action": "list", "drive_path": "."}
+                )
+        self.assertEqual(observed["arguments"][:3], ["exec", "-s", "test-session"])
+        self.assertEqual(observed["source"], source)
+        self.assertEqual(result, remote_result)
+
+    def test_drive_authorization_status_uses_private_probe_output(self):
+        authorization = {
+            "authorized": False,
+            "authorization_url": "https://accounts.google.com/example",
+        }
+        stdout = "CODEX_DRIVE_AUTH=" + server.json.dumps(authorization)
+        lock = MagicMock()
+        lock.__enter__.return_value = None
+        with (
+            patch.object(server, "_require_credentials"),
+            patch.object(server, "_linux_home", return_value="/home/test"),
+            patch.object(server, "_wsl_path", return_value="/plugin/drive_auth_probe.py"),
+            patch.object(server, "_session_cli_lock", return_value=lock),
+            patch.object(server, "_wsl", return_value=completed(stdout=stdout)) as wsl,
+        ):
+            result = server._drive_authorization_status("test-session")
+        self.assertEqual(result, authorization)
+        command = wsl.call_args.args[0]
+        self.assertIn("/plugin/drive_auth_probe.py", command)
+        self.assertNotIn(authorization["authorization_url"], command)
+
     def test_drive_delete_needs_confirmation_before_mounting(self):
         with (
             patch.object(server, "_ensure_drive_workspace") as ensure,
@@ -1032,14 +1113,66 @@ class ServerTests(unittest.TestCase):
             "drive_path": "MyDrive/codex-colab",
         }
         with (
-            patch.object(server, "_remote_shell", return_value=completed()),
             patch.object(server, "_colab") as colab,
             patch.object(server, "_drive_operation", return_value=workspace),
         ):
             result = server.mount_google_drive("test-session")
         colab.assert_not_called()
         self.assertTrue(result["already_mounted"])
+        self.assertFalse(result["authorization_required"])
         self.assertEqual(result["scope"], "MyDrive/codex-colab only")
+
+    def test_drive_mount_opens_approval_without_starting_blocking_mount(self):
+        authorization_url = "https://accounts.google.com/example"
+        with (
+            patch.object(
+                server, "_drive_operation", side_effect=RuntimeError("not mounted")
+            ),
+            patch.object(
+                server,
+                "_drive_authorization_status",
+                return_value={
+                    "authorized": False,
+                    "authorization_url": authorization_url,
+                },
+            ),
+            patch.object(server.webbrowser, "open", return_value=True) as browser,
+            patch.object(server, "_colab") as colab,
+        ):
+            result = server.mount_google_drive("test-session")
+        browser.assert_called_once_with(authorization_url, new=2)
+        colab.assert_not_called()
+        self.assertTrue(result["authorization_required"])
+        self.assertTrue(result["browser_opened"])
+        self.assertNotIn("authorization_url", result)
+
+    def test_drive_mount_runs_only_after_authorization_is_ready(self):
+        workspace = {
+            "mounted": True,
+            "workspace_exists": True,
+            "workspace_path": "/content/drive/MyDrive/codex-colab",
+            "drive_path": "MyDrive/codex-colab",
+        }
+        with (
+            patch.object(
+                server,
+                "_drive_operation",
+                side_effect=[RuntimeError("not mounted"), workspace],
+            ),
+            patch.object(
+                server,
+                "_drive_authorization_status",
+                return_value={"authorized": True, "authorization_url": None},
+            ),
+            patch.object(server, "_colab", return_value=completed()) as colab,
+        ):
+            result = server.mount_google_drive("test-session")
+        colab.assert_called_once_with(
+            ["drivemount", "-s", "test-session", "/content/drive"], timeout=180
+        )
+        self.assertFalse(result["already_mounted"])
+        self.assertFalse(result["authorization_required"])
+        self.assertEqual(result["workspace_path"], workspace["workspace_path"])
 
     def test_transfer_cancel_and_resume_preserve_state(self):
         with (

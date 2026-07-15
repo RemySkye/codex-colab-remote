@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -908,12 +909,43 @@ def _remote_shell(
         "print('CODEX_REMOTE_SHELL='+json.dumps({"
         "'returncode':result.returncode,'stdout':result.stdout,'stderr':result.stderr},separators=(',',':')))\n"
     )
-    python_encoded = base64.b64encode(python.encode()).decode()
-    cli_result = _colab(
-        ["console", "-s", session],
-        input_text=f"printf %s {shlex.quote(python_encoded)} | base64 -d | python3\n",
-        timeout=timeout + 30,
-    )
+    # ``colab console`` is interactive and can corrupt long or rapidly pasted
+    # input. Stage the generated helper with the official upload command, then
+    # execute it with one short console command.
+    _secure_state_root()
+    nonce = secrets.token_hex(12)
+    local_helper = STATE_ROOT / f"remote-shell-{nonce}.py"
+    remote_helper = f"/content/.codex-remote-shell-{nonce}.py"
+    uploaded = False
+    try:
+        with local_helper.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(python)
+        try:
+            os.chmod(local_helper, 0o600)
+        except OSError:
+            pass
+        _colab(
+            ["upload", "-s", session, _wsl_path(local_helper), remote_helper],
+            timeout=min(timeout + 30, 1800),
+        )
+        uploaded = True
+        command = (
+            f"python3 {shlex.quote(remote_helper)}; _codex_remote_status=$?; "
+            f"rm -f {shlex.quote(remote_helper)}; (exit $_codex_remote_status)\n"
+        )
+        cli_result = _colab(
+            ["console", "-s", session],
+            input_text=command,
+            timeout=timeout + 30,
+        )
+    finally:
+        local_helper.unlink(missing_ok=True)
+        if uploaded:
+            _colab(
+                ["rm", "-s", session, remote_helper],
+                timeout=60,
+                check=False,
+            )
     payload = _extract_json_marker(cli_result.stdout, "CODEX_REMOTE_SHELL=")
     result = subprocess.CompletedProcess(
         ["remote-shell", session],
@@ -2345,8 +2377,96 @@ def export_session_notebook(
 
 def _drive_operation(session_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     session = _validate_session_name(session_name)
-    result = _remote_shell(session, drive_ops.remote_script(payload), timeout=1800)
-    return _extract_json_marker(result.stdout, drive_ops.RESULT_MARKER)
+    python_source = drive_ops.remote_script(payload)
+    record = _load_session_ledger().get(session, {})
+    language = str(record.get("language") or "python").lower()
+    if language not in LANGUAGES:
+        language = "python"
+
+    _secure_state_root()
+    nonce = secrets.token_hex(12)
+    helper = STATE_ROOT / f"drive-operation-{nonce}.py"
+    wrapper: Path | None = None
+    remote_helper = f"/content/.codex-drive-operation-{nonce}.py"
+    uploaded = False
+    try:
+        with helper.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(python_source)
+        try:
+            os.chmod(helper, 0o600)
+        except OSError:
+            pass
+
+        execute_path = helper
+        if language != "python":
+            _colab(
+                ["upload", "-s", session, _wsl_path(helper), remote_helper],
+                timeout=1800,
+            )
+            uploaded = True
+            suffix = ".R" if language == "r" else ".jl"
+            wrapper = STATE_ROOT / f"drive-operation-{nonce}{suffix}"
+            if language == "r":
+                wrapper_source = (
+                    f'status <- system2("python3", {json.dumps(remote_helper)})\n'
+                    'if (!identical(status, 0L)) stop("Drive helper failed")\n'
+                )
+            else:
+                wrapper_source = f'run(`python3 {remote_helper}`)\n'
+            with wrapper.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(wrapper_source)
+            try:
+                os.chmod(wrapper, 0o600)
+            except OSError:
+                pass
+            execute_path = wrapper
+
+        result = _colab(
+            [
+                "exec",
+                "-s",
+                session,
+                "-f",
+                _wsl_path(execute_path),
+                "--timeout",
+                "1800",
+            ],
+            timeout=1830,
+        )
+        try:
+            return _extract_json_marker(result.stdout, drive_ops.RESULT_MARKER)
+        except RuntimeError as exc:
+            detail = _redact((result.stderr or result.stdout).strip())
+            raise RuntimeError(detail or str(exc)) from exc
+    finally:
+        helper.unlink(missing_ok=True)
+        if wrapper is not None:
+            wrapper.unlink(missing_ok=True)
+        if uploaded:
+            _colab(
+                ["rm", "-s", session, remote_helper], timeout=60, check=False
+            )
+
+
+def _drive_authorization_status(session_name: str) -> dict[str, Any]:
+    """Check Drive authorization without starting a mount or blocking on a TTY."""
+    session = _validate_session_name(session_name)
+    _require_credentials()
+    python = f"{_linux_home()}/.local/share/uv/tools/google-colab-cli/bin/python"
+    command = [
+        "env",
+        "-u",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "-u",
+        "CLOUDSDK_CONFIG",
+        python,
+        _wsl_path(PLUGIN_ROOT / "scripts" / "drive_auth_probe.py"),
+        "--session",
+        session,
+    ]
+    with _session_cli_lock(session, 90):
+        result = _wsl(command, timeout=90)
+    return _extract_json_marker(result.stdout, "CODEX_DRIVE_AUTH=")
 
 
 def _ensure_drive_workspace(
@@ -2363,28 +2483,50 @@ def mount_google_drive(
     session_name: SessionName,
     mount_path: DriveMountPath = drive_ops.DRIVE_MOUNT_PATH,
 ) -> dict[str, Any]:
-    """Mount Drive and create the protected MyDrive/codex-colab workspace."""
+    """Mount Drive safely; first use may open Google's approval page."""
     session = _validate_session_name(session_name)
     if mount_path != drive_ops.DRIVE_MOUNT_PATH:
         raise ValueError(f"mount_path must be {drive_ops.DRIVE_MOUNT_PATH}")
     already_mounted = True
     try:
-        _remote_shell(
-            session,
-            f"test -d {shlex.quote(drive_ops.DRIVE_MOUNT_PATH + '/MyDrive')}",
-            timeout=60,
-        )
+        workspace = _drive_operation(session, {"action": "bootstrap"})
         mount_result = subprocess.CompletedProcess([], 0, "", "")
     except RuntimeError:
         already_mounted = False
+        authorization = _drive_authorization_status(session)
+        if not authorization.get("authorized"):
+            authorization_url = authorization.get("authorization_url")
+            browser_opened = False
+            if isinstance(authorization_url, str) and authorization_url:
+                try:
+                    browser_opened = bool(webbrowser.open(authorization_url, new=2))
+                except webbrowser.Error:
+                    browser_opened = False
+            return {
+                "session_name": session,
+                "mount_path": drive_ops.DRIVE_MOUNT_PATH,
+                "already_mounted": False,
+                "authorization_required": True,
+                "browser_opened": browser_opened,
+                "scope": "MyDrive/codex-colab only",
+                "next_step": (
+                    "Approve Google Drive access in the browser, then call "
+                    "mount_google_drive again. Do not copy or paste any authorization code."
+                ),
+                "trusted_terminal_fallback": (
+                    f"colab --auth oauth2 drivemount -s {session} "
+                    f"{drive_ops.DRIVE_MOUNT_PATH}"
+                ),
+            }
         mount_result = _colab(
-            ["drivemount", "-s", session, drive_ops.DRIVE_MOUNT_PATH], timeout=600
+            ["drivemount", "-s", session, drive_ops.DRIVE_MOUNT_PATH], timeout=180
         )
-    workspace = _drive_operation(session, {"action": "bootstrap"})
+        workspace = _drive_operation(session, {"action": "bootstrap"})
     return {
         "session_name": session,
         "mount_path": drive_ops.DRIVE_MOUNT_PATH,
         "already_mounted": already_mounted,
+        "authorization_required": False,
         "scope": "MyDrive/codex-colab only",
         **workspace,
         **_output(mount_result),

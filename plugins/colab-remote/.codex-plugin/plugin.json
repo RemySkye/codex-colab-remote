@@ -1,6 +1,6 @@
 {
   "name": "colab-remote",
-  "version": "0.6.2+codex.20260715172432",
+  "version": "0.6.3+codex.20260715202719",
   "description": "Operate Colab compute, notebooks, resumable files, recoverable jobs, and optional SSH.",
   "author": {
     "name": "RemySkye",
