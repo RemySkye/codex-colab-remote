@@ -9,6 +9,7 @@
 - Improved MCP and skill guidance so agents choose the shortest safe workflow.
 - Added protocol tests that prevent ambiguous or undocumented tool schemas from returning.
 - Simplified the Linux/macOS one-line installer while preserving interactive OAuth input.
+- Fixed the SSH Colab Secret name to `NGROK_AUTHTOKEN` instead of storing a configurable label.
 
 ## 0.6.0
 

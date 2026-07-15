@@ -43,7 +43,6 @@ try {
     }
     $config = Get-Content -Raw (Join-Path $testState 'config.json') | ConvertFrom-Json
     if (-not $config.ssh_tunnel_enabled) { throw 'Installer did not enable the requested SSH option.' }
-    if ($config.ssh_secret_name -ne 'NGROK_AUTHTOKEN') { throw 'Installer wrote the wrong SSH secret name.' }
     if ($config.default_language -ne 'r') { throw 'Installer did not write the R runtime default.' }
     if ($config.default_runtime_version -ne '2026.04') { throw 'Installer did not write the runtime version default.' }
     if ($config.default_max_lifetime_minutes -ne 90) { throw 'Installer did not write the session lifetime default.' }

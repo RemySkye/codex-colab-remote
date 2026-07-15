@@ -276,7 +276,10 @@ class ServerTests(unittest.TestCase):
             state = Path(temporary) / "state"
             state.mkdir()
             config_path = state / "config.json"
-            config_path.write_text('{"prefer_high_ram": true}', encoding="utf-8")
+            config_path.write_text(
+                '{"prefer_high_ram": true, "ssh_secret_name": "OLD_LABEL"}',
+                encoding="utf-8",
+            )
             with (
                 patch.object(server, "STATE_ROOT", state),
                 patch.object(server, "CONFIG_PATH", config_path),
@@ -285,6 +288,7 @@ class ServerTests(unittest.TestCase):
                 result = server.get_config()
         self.assertTrue(result["default_high_ram"])
         self.assertNotIn("prefer_high_ram", result)
+        self.assertNotIn("ssh_secret_name", result)
 
     def test_config_requires_confirmation_to_enable_ssh(self):
         with (

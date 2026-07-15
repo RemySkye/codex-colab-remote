@@ -37,6 +37,7 @@ MONITORS_ROOT = STATE_ROOT / "monitors"
 LEASES_ROOT = STATE_ROOT / "leases"
 SSH_ROOT = STATE_ROOT / "ssh"
 TRANSFERS_ROOT = STATE_ROOT / "transfers"
+SSH_SECRET_NAME = "NGROK_AUTHTOKEN"
 
 ACCELERATORS = {"cpu", "t4", "l4", "g4", "h100", "a100", "v5e-1", "v6e-1"}
 LANGUAGES = {"python", "julia", "r"}
@@ -79,7 +80,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "require_cost_acknowledgement": True,
     "allowed_local_roots": [],
     "ssh_tunnel_enabled": False,
-    "ssh_secret_name": "NGROK_AUTHTOKEN",
 }
 
 # Reusable public MCP types keep the generated tool schemas precise and compact.
@@ -261,6 +261,7 @@ def _load_config() -> dict[str, Any]:
         if "default_high_ram" not in loaded and "prefer_high_ram" in loaded:
             loaded["default_high_ram"] = bool(loaded["prefer_high_ram"])
         loaded.pop("prefer_high_ram", None)
+        loaded.pop("ssh_secret_name", None)
         config.update(loaded)
     config["require_cost_acknowledgement"] = True
     return config
@@ -1521,12 +1522,6 @@ def set_config(
             description="Enable optional public ngrok SSH; terminal_exec does not require it."
         ),
     ] = None,
-    ssh_secret_name: Annotated[
-        str | None,
-        Field(
-            description="Colab Secret name containing the ngrok token; never the token value."
-        ),
-    ] = None,
     distro: Annotated[
         str | None,
         Field(description="WSL distribution on Windows; ignored on Linux and macOS."),
@@ -1587,14 +1582,6 @@ def set_config(
                 "The user must explicitly confirm enabling a public SSH tunnel"
             )
         config["ssh_tunnel_enabled"] = ssh_tunnel_enabled
-    if ssh_secret_name is not None:
-        if not confirm_sensitive_change:
-            raise PermissionError(
-                "The user must explicitly confirm changing the Colab tunnel secret name"
-            )
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,63}", ssh_secret_name):
-            raise ValueError("Invalid Colab secret name")
-        config["ssh_secret_name"] = ssh_secret_name
     _save_config(config)
     return config
 
@@ -3006,7 +2993,7 @@ def ssh_requirements() -> dict[str, Any]:
     return {
         "enabled_in_config": bool(config["ssh_tunnel_enabled"]),
         "tunnel_provider": "ngrok TCP",
-        "colab_secret_name": config["ssh_secret_name"],
+        "colab_secret_name": SSH_SECRET_NAME,
         "openssh_client_present": all(
             shutil.which(name) for name in ("ssh", "scp", "ssh-keygen")
         ),
@@ -3121,9 +3108,7 @@ def prepare_ssh_browser(
         )
         public_key = private_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
         nonce = secrets.token_urlsafe(24)
-        bootstrap = _render_ssh_bootstrap(
-            session, nonce, public_key, str(config["ssh_secret_name"])
-        )
+        bootstrap = _render_ssh_bootstrap(session, nonce, public_key, SSH_SECRET_NAME)
         pending = {
             "session_name": session,
             "pending_browser_bootstrap": True,
@@ -3139,7 +3124,7 @@ def prepare_ssh_browser(
             "browser_bootstrap_required": True,
             "session_url": _redact(url_result.stdout.strip()),
             "bootstrap_code": bootstrap,
-            "secret_name": str(config["ssh_secret_name"]),
+            "secret_name": SSH_SECRET_NAME,
             "warning": "Run this cell only in the returned Colab notebook, then pass its CODEX_SSH_MANIFEST output to register_ssh_manifest.",
         }
     except Exception:
@@ -3238,9 +3223,7 @@ def enable_ssh(
         )
         public_key = private_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
         nonce = secrets.token_urlsafe(24)
-        bootstrap = _render_ssh_bootstrap(
-            session, nonce, public_key, str(config["ssh_secret_name"])
-        )
+        bootstrap = _render_ssh_bootstrap(session, nonce, public_key, SSH_SECRET_NAME)
         result = _colab(
             ["exec", "-s", session, "--timeout", "900"],
             input_text=bootstrap,

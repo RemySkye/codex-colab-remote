@@ -51,6 +51,9 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("description", create["high_ram"])
         self.assertNotIn("prefer_high_ram", create)
 
+        config = tools["set_config"].inputSchema["properties"]
+        self.assertNotIn("ssh_secret_name", config)
+
         prepare = tools["prepare_language"].inputSchema["properties"]
         self.assertEqual(set(prepare), {"session_name", "language"})
         self.assertNotIn("acknowledge_external_download", prepare)
