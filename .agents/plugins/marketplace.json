@@ -5,10 +5,10 @@
   },
   "plugins": [
     {
-      "name": "colab-ssh",
+      "name": "colab-remote",
       "source": {
         "source": "local",
-        "path": "./plugins/colab-ssh"
+        "path": "./plugins/colab-remote"
       },
       "policy": {
         "installation": "AVAILABLE",

@@ -37,7 +37,11 @@ end {
         }
     }
 
-    $wslArguments = @('-d', $distro, '--', $colabPath) + [string[]] $converted
+    $wslArguments = @(
+        '-d', $distro, '--',
+        'env', '-u', 'GOOGLE_APPLICATION_CREDENTIALS', '-u', 'CLOUDSDK_CONFIG',
+        $colabPath, '--auth', 'oauth2'
+    ) + [string[]] $converted
     if ($pipelineLines.Count -gt 0) {
         ($pipelineLines -join [Environment]::NewLine) | & wsl.exe @wslArguments
     }

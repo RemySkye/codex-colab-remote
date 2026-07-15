@@ -1,8 +1,16 @@
 [CmdletBinding()]
 param(
     [string] $Distro = 'Ubuntu',
+    [ValidateSet('cpu', 't4', 'l4', 'g4', 'h100', 'a100', 'v5e1', 'v6e1')]
+    [string] $DefaultAccelerator = 'cpu',
+    [ValidateSet('python', 'julia')]
+    [string] $DefaultLanguage = 'python',
+    [switch] $PreferHighRam,
+    [string[]] $AllowedLocalRoot = @(),
+    [switch] $DisableNotifications,
     [switch] $SkipAuthentication,
-    [switch] $RunSmokeTest
+    [switch] $RunSmokeTest,
+    [string] $StateRoot = (Join-Path $HOME '.codex\colab-remote')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,7 +18,11 @@ Set-StrictMode -Version Latest
 
 $Repository = 'RemySkye/codex-colab-remote'
 $Marketplace = 'colab-remote'
-$Plugin = 'colab-ssh'
+$Plugin = 'colab-remote'
+$UvVersion = '0.11.28'
+$ColabCliVersion = '0.6.0'
+$UvWindowsSha256 = '09AC738E5C5EEA1D94284B80CEB49B81097891218A79751D08116CD8552B492D'
+$UvShellSha256 = 'B7B3FE80CAD1142A2A5794050B7DB7B3291D1BAC1423B0732571DD9366E8CA8B'
 
 function Write-Step([string] $Message) {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
@@ -35,7 +47,10 @@ function Install-WindowsUv {
     Write-Step 'Installing uv on Windows for the plugin MCP server'
     $installer = Join-Path ([IO.Path]::GetTempPath()) 'uv-install.ps1'
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri 'https://astral.sh/uv/install.ps1' -OutFile $installer
+        Invoke-WebRequest -UseBasicParsing -Uri "https://astral.sh/uv/$UvVersion/install.ps1" -OutFile $installer
+        if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $UvWindowsSha256) {
+            throw 'The downloaded Windows uv installer checksum did not match.'
+        }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
         if ($LASTEXITCODE -ne 0) { throw 'The Windows uv installer failed.' }
     }
@@ -59,21 +74,18 @@ if ((Get-InstalledDistros) -notcontains $Distro) {
 Install-WindowsUv
 
 Write-Step "Installing uv and Google's official Colab CLI inside $Distro"
-$linuxInstall = @'
+$linuxInstall = @"
 set -euo pipefail
-if [ ! -x "$HOME/.local/bin/uv" ]; then
+if [ ! -x "`$HOME/.local/bin/uv" ]; then
   command -v curl >/dev/null 2>&1 || { echo "curl is required inside WSL" >&2; exit 12; }
-  curl -LsSf https://astral.sh/uv/install.sh -o /tmp/colab-remote-uv-install.sh
+  curl -LsSf https://astral.sh/uv/$UvVersion/install.sh -o /tmp/colab-remote-uv-install.sh
+  printf '%s  %s\n' '$UvShellSha256' /tmp/colab-remote-uv-install.sh | sha256sum -c -
   sh /tmp/colab-remote-uv-install.sh
   rm -f /tmp/colab-remote-uv-install.sh
 fi
-if [ -x "$HOME/.local/bin/colab" ]; then
-  "$HOME/.local/bin/uv" tool upgrade google-colab-cli
-else
-  "$HOME/.local/bin/uv" tool install google-colab-cli
-fi
-"$HOME/.local/bin/colab" version
-'@
+"`$HOME/.local/bin/uv" tool install --force "google-colab-cli==$ColabCliVersion"
+"`$HOME/.local/bin/colab" version
+"@
 $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxInstall.Replace("`r`n", "`n")))
 & wsl.exe -d $Distro -- bash -lc "printf %s '$encoded' | base64 -d | bash"
 if ($LASTEXITCODE -ne 0) { throw 'Installing google-colab-cli inside WSL failed.' }
@@ -95,6 +107,34 @@ Write-Step 'Installing or updating the Colab Remote plugin'
 & codex plugin add "$Plugin@$Marketplace"
 if ($LASTEXITCODE -ne 0) { throw 'Codex could not install the Colab Remote plugin.' }
 
+Write-Step 'Saving safe Colab Remote defaults'
+$approvedRoots = @()
+foreach ($root in $AllowedLocalRoot) {
+    $resolved = (Resolve-Path -LiteralPath $root -ErrorAction Stop).Path
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "Allowed local root must be a directory: $root"
+    }
+    $approvedRoots += $resolved
+}
+New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+$config = [ordered]@{
+    distro = $Distro
+    default_accelerator = $DefaultAccelerator
+    default_language = $DefaultLanguage
+    prefer_high_ram = [bool] $PreferHighRam
+    default_timeout_seconds = 3600
+    compute_warning_minutes = 60
+    notifications_enabled = -not [bool] $DisableNotifications
+    require_cost_acknowledgement = $true
+    allowed_local_roots = @($approvedRoots | Sort-Object -Unique)
+}
+$configJson = ($config | ConvertTo-Json -Depth 4) + "`n"
+$utf8NoBom = [Text.UTF8Encoding]::new($false)
+[IO.File]::WriteAllText((Join-Path $StateRoot 'config.json'), $configJson, $utf8NoBom)
+$windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+& icacls.exe $StateRoot /inheritance:r /grant:r "${windowsIdentity}:(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not restrict access to the Colab Remote state directory.' }
+
 $linuxHome = (& wsl.exe -d $Distro -- sh -lc 'printf %s "$HOME"').Trim()
 if (-not $linuxHome) { throw "Could not discover the Linux home directory in $Distro." }
 $linuxColab = "$linuxHome/.local/bin/colab"
@@ -102,10 +142,15 @@ $linuxColab = "$linuxHome/.local/bin/colab"
 if (-not $SkipAuthentication) {
     Write-Step 'Authenticating directly with Google Colab'
     Write-Host 'Follow the Google sign-in link. If Google displays a one-time code, paste it back into this terminal.'
-    & wsl.exe -d $Distro -- $linuxColab sessions
+    $authentication = @'
+set -e
+umask 077
+env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG '__COLAB__' --auth oauth2 sessions
+token="$HOME/.config/colab-cli/token.json"
+if [ -f "$token" ]; then chmod 600 "$token"; fi
+'@.Replace('__COLAB__', $linuxColab)
+    & wsl.exe -d $Distro -- bash -lc $authentication
     if ($LASTEXITCODE -ne 0) { throw 'Google Colab authentication failed.' }
-    & wsl.exe -d $Distro -- sh -lc 'token="$HOME/.config/colab-cli/token.json"; if [ -f "$token" ]; then chmod 600 "$token"; fi'
-    if ($LASTEXITCODE -ne 0) { throw 'Could not secure the cached Colab OAuth token.' }
 }
 
 if ($RunSmokeTest) {
@@ -113,21 +158,21 @@ if ($RunSmokeTest) {
     $session = 'codex-install-smoke-' + (Get-Random -Minimum 1000 -Maximum 9999)
     $created = $false
     try {
-        & wsl.exe -d $Distro -- $linuxColab new -s $session
+        & wsl.exe -d $Distro -- env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG $linuxColab --auth oauth2 new -s $session
         if ($LASTEXITCODE -ne 0) { throw 'Could not create the smoke-test session.' }
         $created = $true
-        'print("COLAB_REMOTE_INSTALL_OK")' | & wsl.exe -d $Distro -- $linuxColab exec -s $session --timeout 120
+        'print("COLAB_REMOTE_INSTALL_OK")' | & wsl.exe -d $Distro -- env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG $linuxColab --auth oauth2 exec -s $session --timeout 120
         if ($LASTEXITCODE -ne 0) { throw 'Remote smoke-test execution failed.' }
     }
     finally {
         if ($created) {
-            & wsl.exe -d $Distro -- $linuxColab stop -s $session
+            & wsl.exe -d $Distro -- env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG $linuxColab --auth oauth2 stop -s $session
             $stopExitCode = $LASTEXITCODE
-            $sessionListing = @(& wsl.exe -d $Distro -- $linuxColab sessions 2>&1)
+            $sessionListing = @(& wsl.exe -d $Distro -- env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG $linuxColab --auth oauth2 sessions 2>&1)
             $sessionsExitCode = $LASTEXITCODE
             $sessionListing | ForEach-Object { Write-Host $_ }
             if ($stopExitCode -ne 0 -or $sessionsExitCode -ne 0 -or ($sessionListing -join "`n") -match [regex]::Escape($session)) {
-                throw "Smoke-test cleanup could not be verified. Run: wsl -d $Distro -- $linuxColab stop -s $session"
+                throw "Smoke-test cleanup could not be verified. Run: wsl -d $Distro -- $linuxColab --auth oauth2 stop -s $session"
             }
         }
     }
@@ -136,5 +181,5 @@ if ($RunSmokeTest) {
 Write-Host "`nColab Remote is installed." -ForegroundColor Green
 Write-Host 'Restart Codex or start a new task so it loads the plugin.'
 if ($SkipAuthentication) {
-    Write-Host "Authenticate later with: wsl -d $Distro -- $linuxColab sessions"
+    Write-Host "Authenticate later inside WSL with: umask 077; env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG $linuxColab --auth oauth2 sessions; chmod 600 ~/.config/colab-cli/token.json"
 }

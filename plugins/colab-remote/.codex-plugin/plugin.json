@@ -1,0 +1,29 @@
+{
+  "name": "colab-remote",
+  "version": "0.4.0",
+  "description": "Secure typed tools for operating Google Colab through Google's official CLI.",
+  "author": {
+    "name": "RemySkye",
+    "url": "https://github.com/RemySkye"
+  },
+  "homepage": "https://github.com/RemySkye/codex-colab-remote",
+  "repository": "https://github.com/RemySkye/codex-colab-remote",
+  "license": "MIT",
+  "keywords": ["colab", "codex", "gpu", "tpu", "wsl"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Colab Remote",
+    "shortDescription": "Securely operate authorized Colab runtimes.",
+    "longDescription": "Typed, OAuth2-only tools around Google's official Colab CLI for provisioning, execution, files, jobs, progress, notifications, logs, and cleanup.",
+    "developerName": "RemySkye",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Official Colab CLI",
+      "Accelerator provisioning",
+      "Restricted files and execution",
+      "Progress and completion notifications"
+    ],
+    "defaultPrompt": "Use $operate-colab-remote to run this safely on my authorized Google Colab runtime."
+  },
+  "mcpServers": "./.mcp.json"
+}

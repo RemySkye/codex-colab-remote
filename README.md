@@ -1,152 +1,86 @@
-# Codex Colab Remote
+# Colab Remote for Codex
 
-Installable Codex plugin for provisioning and operating Google Colab CPU, GPU, and TPU runtimes from Codex. Normal operation uses Google's official Colab CLI; a short-lived, host-key-pinned SSH bridge is included only as a fallback.
+Securely let Codex create and operate your Google Colab runtimes through Google's official Colab CLI. No SSH tunnel, ngrok, browser automation, service account, or Google Cloud ADC is used.
 
-## Fast installation on Windows
+## What it adds
 
-Requirements: Windows 10/11, Codex Desktop with the `codex` CLI available, and WSL2 with Ubuntu initialized once.
+- CPU, T4, L4, G4, H100, A100, TPU v5e-1, or TPU v6e-1 session creation
+- Configurable default accelerator, Python/Julia mode, high-RAM preference, timeout, compute-duration warning, and notifications
+- Python execution and best-effort Julia LTS execution
+- Restricted upload/download, remote files, logs, packages, URLs, and kernel restart
+- Persistent tmux jobs with heartbeat, logs, exit status, JSON progress, and detached Windows completion watchers
+- Cost/quota warning and explicit approval before every allocation
+- Verified cleanup, diagnostics, credential metadata checks, and output redaction
 
-If WSL is not installed, run this in **Administrator PowerShell**, reboot if requested, open Ubuntu once, and create the Linux username when prompted:
+## Install on Windows
 
-```powershell
-wsl --install -d Ubuntu
-```
+Requirements: Windows 10/11, WSL2 with Ubuntu, Codex CLI, and a Google account with Colab access.
 
-Then open a normal PowerShell window and run:
-
-```powershell
-irm https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.ps1 | iex
-```
-
-This installs `uv` on Windows and Ubuntu, installs Google's `google-colab-cli` in Ubuntu, adds the GitHub marketplace to Codex, installs the plugin, and starts Google sign-in. It does not ask for or receive your Google password.
-
-Running code directly from the internet is convenient but should be a deliberate trust decision. To inspect the installer first:
-
-```powershell
-irm https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.ps1 -OutFile .\install-colab-remote.ps1
-notepad .\install-colab-remote.ps1
-& .\install-colab-remote.ps1
-```
-
-Use `-SkipAuthentication`, `-Distro <name>`, or `-RunSmokeTest` only with the downloaded-script form. The smoke test briefly creates a CPU runtime and always attempts to stop it.
-
-## Native Codex installation
-
-These are the closest equivalents to `pip install` or `npm install` for a Codex plugin:
-
-```powershell
-codex plugin marketplace add RemySkye/codex-colab-remote
-codex plugin add colab-ssh@colab-remote
-```
-
-Start a new Codex task after installation so the plugin and MCP server are loaded.
-
-## Fully manual setup
-
-The following commands perform the same setup transparently.
-
-### 1. Install WSL2 and Ubuntu
-
-Run in Administrator PowerShell:
+Open PowerShell:
 
 ```powershell
 wsl --install -d Ubuntu
 ```
 
-Reboot if Windows asks, open Ubuntu once, and finish its username/password setup.
-
-### 2. Install uv on Windows
-
-The Windows copy runs the plugin's local MCP server:
+Reboot if asked and finish the Ubuntu username setup. Then download and inspect the installer before running it:
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+irm https://raw.githubusercontent.com/RemySkye/codex-colab-remote/v0.4.0/install.ps1 -OutFile install-colab-remote.ps1
+Get-Content .\install-colab-remote.ps1
+.\install-colab-remote.ps1
 ```
 
-Open a new PowerShell window afterward if `uv --version` is not immediately found.
-
-### 3. Install uv and the Colab CLI inside Ubuntu
+The short form is available after the `v0.4.0` release is published:
 
 ```powershell
-wsl -d Ubuntu -- bash -lc 'curl -LsSf https://astral.sh/uv/install.sh | sh'
-wsl -d Ubuntu -- bash -lc '~/.local/bin/uv tool install google-colab-cli'
-wsl -d Ubuntu -- bash -lc '~/.local/bin/colab version'
+irm https://raw.githubusercontent.com/RemySkye/codex-colab-remote/v0.4.0/install.ps1 | iex
 ```
 
-The Colab CLI currently supports Linux and macOS, so Windows uses it through WSL2.
+The installer pins uv `0.11.28` and Google Colab CLI `0.6.0`. It installs the Codex plugin, writes safe defaults, and then opens Google authentication in your terminal.
 
-### 4. Install the Codex plugin
+Authentication is simple: follow the Google link shown in the terminal and complete sign-in there. If Google gives a one-time code, paste it only into that same terminal—never into Codex or a chat.
+
+## Choose defaults during install
 
 ```powershell
-codex plugin marketplace add RemySkye/codex-colab-remote
-codex plugin add colab-ssh@colab-remote
+.\install-colab-remote.ps1 `
+  -DefaultAccelerator a100 `
+  -DefaultLanguage python `
+  -PreferHighRam `
+  -AllowedLocalRoot C:\Users\me\Projects
 ```
 
-### 5. Authenticate Google Colab
+Use `-DefaultLanguage julia`, `-DisableNotifications`, `-SkipAuthentication`, or `-RunSmokeTest` when needed. The smoke test briefly allocates a CPU runtime and may use quota.
+
+Restart Codex after installation. Then ask: “Use Colab Remote to create a T4 session, run this job, notify me when it finishes, download the results, and stop the session.”
+
+## Important limits
+
+- Google controls capacity, idle shutdown, session duration, and quota. A heartbeat monitors work but does not bypass Colab policies.
+- The official CLI does not currently expose a high-RAM allocation switch. The plugin records your preference, measures actual RAM, and warns you honestly.
+- Julia is not a native CLI kernel. The plugin can install Juliaup LTS inside the Python VM only after your approval.
+- `/content` is temporary. Download or checkpoint important results before stopping.
+- The plugin cannot show an exact price because Colab plan pricing and compute-unit consumption are account-specific. It warns before allocating expensive hardware.
+- Completion watchers are detached and saved for restart recovery, but Windows shutdown or security software can still stop them. Reopen Codex and call `watch_job` to recover a watcher.
+
+## Security model
+
+- OAuth2 only; ADC environment variables are removed from every CLI call.
+- Codex never reads or returns token contents. It only checks existence and owner-only permissions.
+- Local file access is disabled by default and limited to explicitly approved folders.
+- Credentials and authorization codes are redacted from errors and blocked by repository secret scanning.
+- Configuration and notification state are restricted to the current Windows user.
+
+No software can promise zero risk. See [SECURITY.md](SECURITY.md) for the threat model and revocation steps.
+
+## Develop and test
 
 ```powershell
-wsl -d Ubuntu -- bash -lc '~/.local/bin/colab sessions'
+uv sync --project plugins\colab-remote
+uv run --project plugins\colab-remote ruff check plugins\colab-remote
+uv run --project plugins\colab-remote python -m unittest discover -s plugins\colab-remote\tests -v
+python plugins\colab-remote\scripts\validate_repo.py
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\installer-smoke.ps1
 ```
 
-On first use, the CLI prints a Google authorization link. Open it, choose the Google account that owns the Colab subscription or compute units, approve the requested scopes, and paste the one-time authorization code into the same PowerShell terminal if prompted. The code is exchanged locally for an OAuth token stored inside WSL at `~/.config/colab-cli/token.json`; the plugin sets that file to owner-only permissions (`600`).
-
-This resembles `gcloud auth application-default login`, but the default plugin path authenticates directly with the Colab CLI and does **not** require Google Cloud CLI. The Colab CLI also exposes an `--auth adc` mode for users who intentionally manage Application Default Credentials with `gcloud`.
-
-Never send the one-time code, OAuth token, Google password, or recovery codes to another person or commit them to Git.
-
-## Updating
-
-```powershell
-codex plugin marketplace upgrade colab-remote
-codex plugin add colab-ssh@colab-remote
-wsl -d Ubuntu -- bash -lc '~/.local/bin/uv tool upgrade google-colab-cli'
-```
-
-Start a new Codex task after updating.
-
-## What it provides
-
-- CPU, T4, L4, G4, H100, A100, and TPU provisioning
-- Python, shell-like console work, and Jupyter notebook execution
-- Uploads, downloads, package installation, logs, and session inspection
-- Google's built-in Colab CLI keep-alive daemon
-- Windows path conversion through WSL2
-- Restartable tmux jobs and checkpoint-oriented recovery guidance
-- Fresh keys and strict host-key verification for the optional SSH fallback
-
-Colab resources and maximum lifetime are not guaranteed. Keep-alive does not override quota, compute-unit exhaustion, account limits, or backend reclamation. Always stop completed sessions.
-
-## Example
-
-Ask Codex:
-
-> Use the Colab Remote plugin to start a G4 session, run this project with checkpoints, monitor it, download the outputs, and stop the session when complete.
-
-The underlying CLI remains available directly:
-
-```powershell
-wsl -d Ubuntu -- bash -lc '~/.local/bin/colab new -s training --gpu G4'
-wsl -d Ubuntu -- bash -lc '~/.local/bin/colab status -s training'
-wsl -d Ubuntu -- bash -lc '~/.local/bin/colab stop -s training'
-```
-
-## Development
-
-```powershell
-uv sync --project plugins\colab-ssh
-uv run --project plugins\colab-ssh python -m unittest discover -s plugins\colab-ssh\tests -v
-python plugins\colab-ssh\scripts\validate_repo.py
-```
-
-## Security
-
-- Review remote installer scripts before executing them in sensitive environments.
-- Never commit Colab OAuth tokens, generated SSH private keys, or session state.
-- The official CLI is preferred over the SSH fallback.
-- The fallback binds SSH to loopback, uses key-only authentication, pins the host key, and attempts remote revocation during cleanup.
-
-See [SECURITY.md](SECURITY.md) for vulnerability reporting.
-
-## License
-
-MIT. Google Colab and the Colab CLI are Google products governed by their own terms and policies.
+The test suite does not allocate paid Colab hardware. `-RunSmokeTest` is the explicit live integration test.

@@ -1,0 +1,11 @@
+---
+interface:
+  display_name: "Operate Colab Remote"
+  short_description: "Run secure, monitored work on Google Colab"
+  default_prompt: "Use $operate-colab-remote to run this work on a user-authorized Google Colab runtime, monitor it, and clean up safely."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "colab-remote"
+      description: "Typed Google Colab CLI tools"

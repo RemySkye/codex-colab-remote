@@ -6,3 +6,11 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+
+# Credentials and local state must never enter source control.
+token.json
+application_default_credentials.json
+client_secret*.json
+credentials.db
+*.pem
+*.key

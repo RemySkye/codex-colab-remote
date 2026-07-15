@@ -1,4 +1,0 @@
-interface:
-  display_name: "Operate Colab SSH"
-  short_description: "Start and control Colab SSH sessions"
-  default_prompt: "Use $operate-colab-ssh to start a Colab runtime and manage work over secure SSH."

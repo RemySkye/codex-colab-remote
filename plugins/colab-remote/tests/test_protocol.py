@@ -24,8 +24,8 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             cwd=ROOT,
         )
         names = await self._list_tools(parameters)
-        self.assertIn("prepare_session", names)
-        self.assertIn("ssh_exec", names)
+        self.assertIn("create_session", names)
+        self.assertIn("credential_status", names)
         self.assertIn("start_job", names)
 
     @unittest.skipUnless(sys.platform == "win32", "PowerShell launcher is Windows-specific")
@@ -42,7 +42,8 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             cwd=ROOT,
         )
         names = await self._list_tools(parameters)
-        self.assertIn("prepare_session", names)
+        self.assertIn("create_session", names)
+        self.assertIn("test_notification", names)
 
 
 if __name__ == "__main__":

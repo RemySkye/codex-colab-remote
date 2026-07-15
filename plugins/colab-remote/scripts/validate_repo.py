@@ -1,4 +1,4 @@
-"""Portable repository checks that do not depend on a Codex installation."""
+"""Portable repository and secret-safety checks."""
 
 from __future__ import annotations
 
@@ -19,44 +19,59 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-manifest_path = ROOT / ".codex-plugin" / "plugin.json"
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-if manifest.get("name") != ROOT.name:
-    fail("plugin name must match the repository installation folder")
+manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+if manifest.get("name") != "colab-remote":
+    fail("plugin name must be colab-remote")
 if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", str(manifest.get("version", ""))):
     fail("plugin version is not valid semver")
 if manifest.get("mcpServers") != "./.mcp.json":
     fail("plugin must reference .mcp.json")
 
 mcp_config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
-if "colab-ssh" not in mcp_config.get("mcpServers", {}):
-    fail("colab-ssh MCP server is missing")
+if set(mcp_config.get("mcpServers", {})) != {"colab-remote"}:
+    fail(".mcp.json must expose only colab-remote")
 
 required = [
     ROOT / "scripts" / "colab.ps1",
     ROOT / "scripts" / "runtime.ps1",
     ROOT / "scripts" / "run_mcp.ps1",
-    ROOT / "skills" / "operate-colab-ssh" / "SKILL.md",
+    ROOT / "skills" / "operate-colab-remote" / "SKILL.md",
 ]
 for path in required:
     if not path.exists():
         fail(f"required file is missing: {path.relative_to(ROOT)}")
 
-marketplace_path = REPOSITORY_ROOT / ".agents" / "plugins" / "marketplace.json"
-marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
-if marketplace.get("name") != "colab-remote":
-    fail("repository marketplace must be named colab-remote")
+for obsolete in (
+    ROOT / "assets" / "bootstrap_colab.py.tmpl",
+    ROOT / "scripts" / "start_colab_auth.sh",
+    ROOT / "scripts" / "submit_colab_auth.sh",
+    ROOT / "scripts" / "finish_colab_auth.ps1",
+):
+    if obsolete.exists():
+        fail(f"obsolete credential/tunnel helper remains: {obsolete.relative_to(ROOT)}")
+
+marketplace = json.loads(
+    (REPOSITORY_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
+)
 entries = {entry.get("name"): entry for entry in marketplace.get("plugins", [])}
-entry = entries.get("colab-ssh")
-if not entry or entry.get("source", {}).get("path") != "./plugins/colab-ssh":
-    fail("marketplace must expose ./plugins/colab-ssh")
-if not (REPOSITORY_ROOT / "install.ps1").exists():
-    fail("root bootstrap installer is missing")
+entry = entries.get("colab-remote")
+if marketplace.get("name") != "colab-remote" or not entry:
+    fail("repository marketplace must expose colab-remote")
+if entry.get("source", {}).get("path") != "./plugins/colab-remote":
+    fail("marketplace path must be ./plugins/colab-remote")
 
 banned = {
     "C:\\Users\\Administrator": "hardcoded Windows user",
     "/home/administrator": "hardcoded WSL user",
     "4/0A": "possible OAuth authorization code",
+    "--auth adc": "ADC authentication",
+    "ssh_exec": "obsolete SSH tool",
+    "NGROK_AUTHTOKEN": "obsolete tunnel credential",
+}
+secret_patterns = {
+    r"AIza[0-9A-Za-z_-]{30,}": "Google API key",
+    r"ya29\.[0-9A-Za-z_-]{20,}": "Google OAuth access token",
+    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----": "private key",
 }
 for path in REPOSITORY_ROOT.rglob("*"):
     if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
@@ -68,6 +83,9 @@ for path in REPOSITORY_ROOT.rglob("*"):
     text = path.read_text(encoding="utf-8")
     for needle, description in banned.items():
         if needle in text:
+            fail(f"{description} found in {path.relative_to(REPOSITORY_ROOT)}")
+    for pattern, description in secret_patterns.items():
+        if re.search(pattern, text):
             fail(f"{description} found in {path.relative_to(REPOSITORY_ROOT)}")
 
 print("Repository validation passed.")

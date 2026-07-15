@@ -22,15 +22,20 @@ function global:codex {
     $global:LASTEXITCODE = 0
 }
 
+function global:icacls.exe {
+    $global:LASTEXITCODE = 0
+}
+
+$testState = Join-Path ([IO.Path]::GetTempPath()) ('colab-remote-installer-test-' + [guid]::NewGuid())
 try {
-    & (Join-Path $PSScriptRoot '..\install.ps1') -Distro Ubuntu
+    & (Join-Path $PSScriptRoot '..\install.ps1') -Distro Ubuntu -StateRoot $testState
     if ($LASTEXITCODE -ne 0) { throw "Installer returned exit code $LASTEXITCODE" }
 
     $calls = $global:InstallerTestCalls -join "`n"
     foreach ($expected in @(
         'codex plugin marketplace add RemySkye/codex-colab-remote',
-        'codex plugin add colab-ssh@colab-remote',
-        'wsl -d Ubuntu /home/tester/.local/bin/colab sessions'
+        'codex plugin add colab-remote@colab-remote',
+        'wsl -d Ubuntu bash -lc'
     )) {
         if ($calls -notmatch [regex]::Escape($expected)) {
             throw "Installer did not invoke: $expected`n$calls"
@@ -41,5 +46,7 @@ try {
 finally {
     Remove-Item Function:\global:wsl.exe -ErrorAction SilentlyContinue
     Remove-Item Function:\global:codex -ErrorAction SilentlyContinue
+    Remove-Item Function:\global:icacls.exe -ErrorAction SilentlyContinue
     Remove-Variable InstallerTestCalls -Scope Global -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $testState -Recurse -Force -ErrorAction SilentlyContinue
 }

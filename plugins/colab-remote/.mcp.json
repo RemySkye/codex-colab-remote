@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "colab-ssh": {
+    "colab-remote": {
       "command": "powershell",
       "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${__dirname}/scripts/run_mcp.ps1"]
     }
