@@ -8,6 +8,8 @@ Report vulnerabilities privately through this repository's GitHub Security Advis
 - MCP tools never read or return the cached OAuth token. They inspect only file presence and permissions.
 - Authentication happens in the user's terminal; there is no code-handoff helper.
 - Local files are inaccessible unless their parent directory is explicitly allowlisted.
+- Drive tools are limited to `MyDrive/codex-colab`; they reject absolute/traversal paths, symlink escapes, and sources or destinations elsewhere in the Drive mount.
+- The `codex-colab` root cannot be deleted, and deleting an item inside it requires explicit confirmation.
 - Destructive cleanup and compute reallocation require confirmation.
 - Common Google secrets and hardcoded user paths are blocked by validation and CI.
 - SSH is disabled by default and needs separate acknowledgements for Colab policy and public-tunnel risk.
@@ -19,6 +21,8 @@ Report vulnerabilities privately through this repository's GitHub Security Advis
 Codex and the Colab CLI run as your local OS user. Any process running as that same user could technically access files that user can access. The plugin reduces accidental exposure but cannot defend against an already-compromised host account, Windows WSL distribution, dependency, or Google account.
 
 Remote commands intentionally have full control of the allocated Colab VM. Keep sensitive local directories out of `allowed_local_roots`, review untrusted code, and use a separate Google account for stronger isolation.
+
+Google's Drive mount is visible to code running on the Colab VM. The typed Drive tools enforce the `MyDrive/codex-colab` boundary, and the bundled agent guidance forbids inspecting its parent. This protects normal tool use and reduces accidental damage, but it is not a security boundary against malicious code with full VM control. Use a separate Google account when adversarial code must be isolated from personal Drive data.
 
 Optional SSH creates a public ngrok TCP endpoint and trusts Google Colab and ngrok as service providers. The SSH user is intentionally not root; use typed Colab tools for privileged work. Anyone who obtains the local private key while the tunnel is active could access that runtime. The plugin cannot protect a key from a compromised local OS account.
 

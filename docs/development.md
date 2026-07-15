@@ -5,8 +5,9 @@ Install `uv` and run:
 ```bash
 python plugins/colab-remote/scripts/validate_repo.py
 uv sync --project plugins/colab-remote
-uv run --project plugins/colab-remote ruff check plugins/colab-remote
+uv run --project plugins/colab-remote ruff check plugins/colab-remote install.py tests/test_installer.py
 uv run --project plugins/colab-remote python -m unittest discover -s plugins/colab-remote/tests -v
+python tests/test_installer.py -v
 ```
 
 On Windows, also run the mocked installer test:
@@ -20,6 +21,7 @@ On Linux/macOS:
 ```bash
 bash -n install.sh
 bash install.sh --help
+python3 install.py --help
 ```
 
 GitHub Actions repeats repository, lint, unit, MCP protocol, and installer checks on `windows-latest`, `ubuntu-latest`, and `macos-latest`. Linux/macOS jobs install and invoke the real official Colab CLI without authenticating or allocating compute. Security CI runs Gitleaks, dependency audit, and CodeQL.

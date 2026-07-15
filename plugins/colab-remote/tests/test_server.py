@@ -130,9 +130,11 @@ class ServerTests(unittest.TestCase):
                 "authentication_instructions",
                 "cancel_transfer",
                 "create_notebook",
+                "create_drive_folder",
                 "create_session",
                 "credential_status",
                 "delete_notebook_cell",
+                "delete_drive_path",
                 "doctor",
                 "disable_ssh",
                 "download_file",
@@ -148,11 +150,13 @@ class ServerTests(unittest.TestCase):
                 "job_logs",
                 "job_status",
                 "list_files",
+                "list_drive_files",
                 "list_sessions",
                 "list_transfers",
                 "load_notebook_from_drive",
                 "mount_google_drive",
                 "move_notebook_cell",
+                "move_drive_path",
                 "notification_history",
                 "prepare_language",
                 "prepare_ssh_browser",
@@ -161,9 +165,11 @@ class ServerTests(unittest.TestCase):
                 "recovery_status",
                 "register_ssh_manifest",
                 "restart_kernel",
+                "restore_from_drive",
                 "resume_transfer",
                 "run_notebook_cells",
                 "save_notebook_to_drive",
+                "save_to_drive",
                 "session_status",
                 "session_url",
                 "set_config",
@@ -941,8 +947,15 @@ class ServerTests(unittest.TestCase):
                 server.create_notebook(str(notebook))
             with (
                 patch.object(server, "_load_config", return_value=config),
-                patch.object(server, "mount_google_drive") as mount,
+                patch.object(server, "_ensure_drive_workspace") as ensure,
                 patch.object(server, "upload_file", return_value={"exit_code": 0}),
+                patch.object(
+                    server,
+                    "_drive_operation",
+                    return_value={
+                        "drive_path": "MyDrive/codex-colab/Projects/drive.ipynb"
+                    },
+                ) as drive,
                 patch.object(
                     server, "_remote_shell", return_value=completed()
                 ) as shell,
@@ -950,9 +963,83 @@ class ServerTests(unittest.TestCase):
                 result = server.save_notebook_to_drive(
                     "test-session", str(notebook), "Projects/drive.ipynb"
                 )
-            self.assertEqual(result["drive_path"], "MyDrive/Projects/drive.ipynb")
-            mount.assert_called_once_with("test-session")
+            self.assertEqual(
+                result["drive_path"],
+                "MyDrive/codex-colab/Projects/drive.ipynb",
+            )
+            ensure.assert_called_once_with("test-session", mount_if_needed=True)
+            self.assertEqual(drive.call_args.args[1]["action"], "save")
+            self.assertEqual(
+                drive.call_args.args[1]["drive_path"], "Projects/drive.ipynb"
+            )
             self.assertIn("rm -f", shell.call_args.args[1])
+
+    def test_general_drive_tools_pass_only_relative_workspace_paths(self):
+        with (
+            patch.object(server, "_ensure_drive_workspace") as ensure,
+            patch.object(
+                server,
+                "_drive_operation",
+                return_value={
+                    "drive_path": "MyDrive/codex-colab/runs/checkpoint.bin"
+                },
+            ) as operation,
+        ):
+            result = server.save_to_drive(
+                "test-session",
+                "/content/checkpoint.bin",
+                "runs/checkpoint.bin",
+            )
+        ensure.assert_called_once_with("test-session", mount_if_needed=True)
+        self.assertEqual(
+            operation.call_args.args[1],
+            {
+                "action": "save",
+                "remote_path": "/content/checkpoint.bin",
+                "drive_path": "runs/checkpoint.bin",
+                "overwrite": False,
+            },
+        )
+        self.assertEqual(
+            result["drive_path"], "MyDrive/codex-colab/runs/checkpoint.bin"
+        )
+
+    def test_drive_delete_needs_confirmation_before_mounting(self):
+        with (
+            patch.object(server, "_ensure_drive_workspace") as ensure,
+            patch.object(server, "_drive_operation") as operation,
+        ):
+            with self.assertRaises(PermissionError):
+                server.delete_drive_path("test-session", "runs/old", confirm=False)
+        ensure.assert_not_called()
+        operation.assert_not_called()
+
+    def test_drive_paths_reject_traversal_before_remote_access(self):
+        with (
+            patch.object(server, "_ensure_drive_workspace") as ensure,
+            patch.object(server, "_drive_operation") as operation,
+        ):
+            with self.assertRaises(ValueError):
+                server.create_drive_folder("test-session", "../private")
+        ensure.assert_not_called()
+        operation.assert_not_called()
+
+    def test_drive_mount_reuses_mount_and_bootstraps_workspace(self):
+        workspace = {
+            "mounted": True,
+            "workspace_exists": True,
+            "workspace_path": "/content/drive/MyDrive/codex-colab",
+            "drive_path": "MyDrive/codex-colab",
+        }
+        with (
+            patch.object(server, "_remote_shell", return_value=completed()),
+            patch.object(server, "_colab") as colab,
+            patch.object(server, "_drive_operation", return_value=workspace),
+        ):
+            result = server.mount_google_drive("test-session")
+        colab.assert_not_called()
+        self.assertTrue(result["already_mounted"])
+        self.assertEqual(result["scope"], "MyDrive/codex-colab only")
 
     def test_transfer_cancel_and_resume_preserve_state(self):
         with (

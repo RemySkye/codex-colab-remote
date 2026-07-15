@@ -60,13 +60,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertNotIn("Juliaup", runtime_sources)
 
     def test_smoke_test_verifies_cleanup(self):
-        installer = (REPOSITORY_ROOT / "install.ps1").read_text(encoding="utf-8")
-        self.assertIn("$stopExitCode", installer)
-        self.assertIn("$sessionListing", installer)
-        self.assertIn("cleanup could not be verified", installer)
-        posix_installer = (REPOSITORY_ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn("smoke_cleanup", posix_installer)
-        self.assertIn("cleanup could not be verified", posix_installer)
+        installer = (REPOSITORY_ROOT / "install.py").read_text(encoding="utf-8")
+        self.assertIn('self.colab_command(["stop", "-s", session])', installer)
+        self.assertIn('self.colab_command(["sessions"])', installer)
+        self.assertIn("smoke-test cleanup could not be verified", installer)
 
     def test_repository_is_a_native_codex_marketplace(self):
         marketplace = json.loads(
@@ -79,26 +76,40 @@ class RepositoryTests(unittest.TestCase):
         )
         self.assertEqual(entry["source"]["path"], "./plugins/colab-remote")
 
-    def test_bootstrap_uses_native_codex_install_commands(self):
-        installer = (REPOSITORY_ROOT / "install.ps1").read_text(encoding="utf-8")
-        self.assertIn("plugin marketplace add", installer)
-        self.assertIn('plugin add "$Plugin@$Marketplace"', installer)
-        self.assertIn("$SkipAuthentication", installer)
-        self.assertIn("umask 077", installer)
-        self.assertIn("chmod 600", installer)
-        self.assertIn("$EnableSshTunnel", installer)
+    def test_bootstrap_uses_safe_codex_install_and_update_commands(self):
+        installer = (REPOSITORY_ROOT / "install.py").read_text(encoding="utf-8")
+        self.assertIn(
+            '["codex", "plugin", "marketplace", "add", self.marketplace_source]',
+            installer,
+        )
+        self.assertIn(
+            '["codex", "plugin", "marketplace", "upgrade", MARKETPLACE]',
+            installer,
+        )
+        self.assertIn(
+            '["codex", "plugin", "add", f"{PLUGIN}@{MARKETPLACE}"]', installer
+        )
+        self.assertIn("plugin_is_installed", installer)
+        self.assertIn("Preserving existing Google Colab authentication", installer)
+        self.assertIn("skip_authentication", installer)
+        self.assertIn("chmod", installer)
+        self.assertIn("enable_ssh", installer)
 
     def test_posix_bootstrap_is_pinned_and_secure(self):
-        installer = (REPOSITORY_ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn('UV_VERSION="0.11.28"', installer)
-        self.assertIn('COLAB_CLI_VERSION="0.6.0"', installer)
-        self.assertIn("sha256sum -c", installer)
-        self.assertIn("shasum -a 256", installer)
-        self.assertIn('plugin add "${PLUGIN}@${MARKETPLACE}"', installer)
-        self.assertIn("umask 077", installer)
-        self.assertIn("chmod 600", installer)
-        self.assertIn("env -u GOOGLE_APPLICATION_CREDENTIALS", installer)
-        self.assertNotIn("${2,,}", installer)
+        shared = (REPOSITORY_ROOT / "install.py").read_text(encoding="utf-8")
+        launcher = (REPOSITORY_ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('UV_VERSION = "0.11.28"', shared)
+        self.assertIn('COLAB_CLI_VERSION = "0.6.0"', shared)
+        self.assertIn("sha256", shared)
+        self.assertIn('"GOOGLE_APPLICATION_CREDENTIALS"', shared)
+        self.assertIn('python3 "$installer" "$@"', launcher)
+        self.assertLess(len(launcher.splitlines()), 50)
+
+    def test_windows_launcher_delegates_to_shared_installer(self):
+        launcher = (REPOSITORY_ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn("install.py", launcher)
+        self.assertIn("@args", launcher)
+        self.assertLess(len(launcher.splitlines()), 60)
 
     def test_cross_platform_documentation_exists(self):
         for relative in (
@@ -108,6 +119,7 @@ class RepositoryTests(unittest.TestCase):
             "docs/tools.md",
             "docs/troubleshooting.md",
             "docs/development.md",
+            "docs/roadmap.md",
             "wiki/Home.md",
         ):
             self.assertTrue((REPOSITORY_ROOT / relative).is_file(), relative)

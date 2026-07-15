@@ -4,12 +4,7 @@ Start by asking Codex to call `doctor`, `credential_status`, and `list_sessions`
 
 ## Codex cannot find the plugin
 
-Refresh the marketplace, reinstall the plugin, then restart Codex or start a new task:
-
-```text
-codex plugin marketplace upgrade colab-remote
-codex plugin add colab-remote@colab-remote
-```
+Rerun the normal installer, then restart Codex or start a new task. The installer distinguishes Git and local marketplaces, repairs stale registrations, reinstalls the plugin, and verifies that Codex sees it. Do not run `marketplace upgrade` manually against a local marketplace; only Git marketplaces support that operation.
 
 ## Authentication is missing or expired
 
@@ -34,6 +29,12 @@ Call `test_notification` and inspect its reported backend. Windows notifications
 ## Runtime disappeared
 
 Colab can reclaim VMs. Check `recovery_status`. Automatic recovery works only when it was enabled in advance and cannot restore `/content` or process memory. Reallocate manually only after acknowledging additional compute usage.
+
+## Google Drive is not mounted
+
+Call `mount_google_drive` and complete any authorization prompt shown by Google in Colab. Codex must never receive the authorization code or token. All plugin-managed files live under `MyDrive/codex-colab`; paths outside it are intentionally rejected.
+
+For training performance, read active datasets and checkpoints from `/content` and save periodic checkpoints to Drive. Avoid workloads that repeatedly open thousands of small files directly on the mounted Drive filesystem.
 
 ## SSH does not connect
 

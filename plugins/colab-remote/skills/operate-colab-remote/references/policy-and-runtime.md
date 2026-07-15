@@ -14,6 +14,8 @@
 - Recovery job recipes stay in owner-only local state. Do not put credentials directly in job command text; use approved environment or secret mechanisms.
 - Managed transfers keep verified chunks after failure or cancellation for resume and remove bulky local chunks after success. Folder archives are path-checked before extraction.
 - Google Drive mounting may require interactive user authorization. Never request, capture, or log its authorization material.
+- Drive-facing tools are restricted to `MyDrive/codex-colab`. Agents must also treat that workspace as the only allowed Drive location and must not use arbitrary code, terminal, jobs, notebooks, or SSH to inspect or modify the parent mount.
+- The plugin supplies persistence tools but does not impose an autosave interval. Use the user's requested checkpoint behavior and keep active high-I/O training under `/content` when practical.
 - Local file access is disabled unless a directory is explicitly allowlisted. Keep the allowlist narrow.
 - GPU and TPU work can consume paid compute units or limited quota. Always obtain cost acknowledgement before allocation.
 - Google says SSH shells are disallowed on free managed runtimes without a positive compute-unit balance and may be terminated. Optional SSH therefore requires the user to confirm a paid plan with positive compute units.
