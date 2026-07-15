@@ -25,6 +25,7 @@ jobs:
         with:
           version: "0.11.28"
           python-version: "3.12"
+          enable-cache: false
       - name: Audit locked dependencies
         run: |
           uv export --project plugins/colab-remote --frozen --no-dev --output-file requirements-audit.txt
