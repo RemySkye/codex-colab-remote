@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2
 
 - Replaced duplicated PowerShell and shell installation logic with one cross-platform Python installer and two thin launchers.
 - Expanded Google Drive support to general files, folders, checkpoints, models, datasets, and notebooks under the dedicated `MyDrive/codex-colab` workspace.

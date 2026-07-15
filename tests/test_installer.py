@@ -110,7 +110,7 @@ class InstallerTests(unittest.TestCase):
                 completed(
                     0,
                     stdout=(
-                        "colab-remote@colab-remote  installed, enabled  0.6.1  /plugin\n"
+                        "colab-remote@colab-remote  installed, enabled  0.6.2  /plugin\n"
                     ),
                 ),
             ]
@@ -143,7 +143,7 @@ class InstallerTests(unittest.TestCase):
                 completed(0),
                 completed(
                     0,
-                    stdout="colab-remote@colab-remote  installed, enabled  0.6.1  /plugin\n",
+                    stdout="colab-remote@colab-remote  installed, enabled  0.6.2  /plugin\n",
                 ),
             ]
         )
@@ -170,7 +170,7 @@ class InstallerTests(unittest.TestCase):
                 completed(0),
                 completed(
                     0,
-                    stdout="colab-remote@colab-remote  installed, enabled  0.6.1  /plugin\n",
+                    stdout="colab-remote@colab-remote  installed, enabled  0.6.2  /plugin\n",
                 ),
             ]
         )
@@ -200,7 +200,7 @@ class InstallerTests(unittest.TestCase):
                 completed(0),
                 completed(
                     0,
-                    stdout="colab-remote@colab-remote  installed, enabled  0.6.1  /plugin\n",
+                    stdout="colab-remote@colab-remote  installed, enabled  0.6.2  /plugin\n",
                 ),
             ]
         )

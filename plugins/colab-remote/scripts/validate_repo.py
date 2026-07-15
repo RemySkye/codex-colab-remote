@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -28,6 +29,11 @@ if not re.fullmatch(
     r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", str(manifest.get("version", ""))
 ):
     fail("plugin version is not valid semver")
+project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+package_version = str(project.get("project", {}).get("version", ""))
+plugin_version = str(manifest["version"]).split("+", 1)[0]
+if package_version != plugin_version:
+    fail("pyproject and plugin manifest versions must match")
 if manifest.get("mcpServers") != "./.mcp.json":
     fail("plugin must reference .mcp.json")
 
