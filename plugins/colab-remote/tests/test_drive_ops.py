@@ -132,6 +132,28 @@ class DriveOperationTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.perform(action="list", drive_path="link")
 
+    def test_content_root_alias_uses_one_path_spelling(self):
+        alias = self.root / "root-alias"
+        try:
+            alias.symlink_to(self.root, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"Symlinks are unavailable: {exc}")
+        source = self.content / "checkpoint.bin"
+        source.write_bytes(b"checkpoint")
+        lexical_content = alias / "content"
+        result = drive_ops.perform(
+            {
+                "action": "save",
+                "remote_path": str(lexical_content / source.name),
+                "drive_path": "runs/checkpoint.bin",
+            },
+            mount_root=self.mount,
+            content_root=lexical_content,
+        )
+        self.assertEqual(
+            result["drive_path"], "MyDrive/codex-colab/runs/checkpoint.bin"
+        )
+
     def test_folder_cannot_be_moved_inside_itself(self):
         self.perform(action="mkdir", drive_path="runs/current")
         with self.assertRaises(ValueError):

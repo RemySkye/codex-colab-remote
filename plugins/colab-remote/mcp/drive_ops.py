@@ -125,7 +125,8 @@ def _content_path(
     candidate = Path(raw_path)
     if not candidate.is_absolute():
         raise ValueError("remote_path must be absolute inside /content")
-    content = content_root.resolve(strict=True)
+    lexical_content = content_root
+    content = lexical_content.resolve(strict=True)
     drive_mount = mount_root.resolve(strict=False)
     existing_parent = candidate if candidate.exists() else candidate.parent
     resolved_parent = existing_parent.resolve(strict=False)
@@ -140,11 +141,19 @@ def _content_path(
         raise PermissionError(
             "Use Drive tools for MyDrive/codex-colab; other mounted Drive paths are blocked"
         )
-    # Windows can present the same temporary path in long and 8.3 forms. The
-    # production runtime is Linux, where the lexical path is retained so every
-    # existing component can be checked before a copy.
-    symlink_check_path = resolved if os.name == "nt" else candidate
-    _reject_symlink_components(symlink_check_path, content)
+    # Keep one spelling for the component walk. macOS exposes temporary paths
+    # through /var while resolving them through /private/var; mixing those two
+    # equivalent forms makes Path.relative_to fail. The canonical containment
+    # check above remains the security boundary.
+    try:
+        candidate.relative_to(lexical_content)
+    except ValueError:
+        symlink_check_path = resolved
+        symlink_check_root = content
+    else:
+        symlink_check_path = candidate
+        symlink_check_root = lexical_content
+    _reject_symlink_components(symlink_check_path, symlink_check_root)
     if must_exist and not candidate.exists():
         raise FileNotFoundError(f"Remote path does not exist: {candidate}")
     return candidate
@@ -244,7 +253,7 @@ def perform(
 ) -> dict[str, Any]:
     """Perform one validated operation; dependency injection keeps this testable."""
     mount = (mount_root or Path(DRIVE_MOUNT_PATH)).resolve(strict=False)
-    content = (content_root or Path("/content")).resolve(strict=True)
+    content = content_root or Path("/content")
     action = str(payload.get("action", ""))
     root = _workspace_root(mount, create=action != "status")
 
