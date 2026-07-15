@@ -8,7 +8,7 @@ Report vulnerabilities privately through this repository's GitHub Security Advis
 - MCP tools never read or return the cached OAuth token. They inspect only file presence and permissions.
 - Authentication happens in the user's terminal; there is no code-handoff helper.
 - Local files are inaccessible unless their parent directory is explicitly allowlisted.
-- Destructive cleanup and external Julia installation require confirmation.
+- Destructive cleanup and compute reallocation require confirmation.
 - Common Google secrets and hardcoded user paths are blocked by validation and CI.
 - SSH is disabled by default and needs separate acknowledgements for Colab policy and public-tunnel risk.
 - SSH uses a fresh Ed25519 key, strict host-key pinning, key-only login, and an unprivileged account. Password, root, sudo, agent, X11, and TCP forwarding are disabled.
@@ -16,7 +16,7 @@ Report vulnerabilities privately through this repository's GitHub Security Advis
 
 ## Boundaries
 
-Codex and the Colab CLI run as your local OS user. Any process running as that same user could technically access files that user can access. The plugin reduces accidental exposure but cannot defend against an already-compromised Windows account, WSL distribution, dependency, or Google account.
+Codex and the Colab CLI run as your local OS user. Any process running as that same user could technically access files that user can access. The plugin reduces accidental exposure but cannot defend against an already-compromised host account, Windows WSL distribution, dependency, or Google account.
 
 Remote commands intentionally have full control of the allocated Colab VM. Keep sensitive local directories out of `allowed_local_roots`, review untrusted code, and use a separate Google account for stronger isolation.
 
@@ -24,9 +24,15 @@ Optional SSH creates a public ngrok TCP endpoint and trusts Google Colab and ngr
 
 ## Credential storage and revocation
 
-The Colab CLI stores its OAuth token inside WSL at `~/.config/colab-cli/token.json`; the installer changes it to mode `600`. It is excluded from this repository and must never be copied into a bug report.
+The Colab CLI stores its OAuth token at `~/.config/colab-cli/token.json` (inside WSL on Windows); the installer changes it to mode `600`. It is excluded from this repository and must never be copied into a bug report.
 
-To remove the local token, run this yourself:
+To remove the local token, run this yourself on Linux/macOS:
+
+```bash
+rm -f ~/.config/colab-cli/token.json
+```
+
+On Windows:
 
 ```powershell
 wsl -d Ubuntu -- sh -lc 'rm -f ~/.config/colab-cli/token.json'
@@ -38,4 +44,4 @@ If SSH material might be exposed, call `disable_ssh` or stop the Colab session i
 
 ## Release safety
 
-Core uv and Colab CLI installers are version-pinned. Julia's official bootstrap is optional, user-approved, and follows its LTS channel rather than a fixed artifact. CI runs unit/protocol tests, repository secret checks, dependency audit, CodeQL, and release checksum generation. Review version updates before merging.
+Core uv and Colab CLI installers are version-pinned. Python, R, and Julia use native Colab kernels rather than external language installers. CI runs cross-platform unit/protocol tests, repository secret checks, dependency audit, CodeQL, and release checksum generation. Review version updates before merging.

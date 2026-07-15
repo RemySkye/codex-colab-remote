@@ -1,11 +1,11 @@
 ---
 interface:
   display_name: "Operate Colab Remote"
-  short_description: "Run monitored Colab work with optional SSH"
-  default_prompt: "Use $operate-colab-remote to run this work on my authorized Google Colab runtime, optionally use secure SSH, monitor it, and clean up safely."
+  short_description: "Run notebooks and recoverable jobs on Colab"
+  default_prompt: "Use $operate-colab-remote to choose my Colab hardware and runtime, work with notebooks and files, monitor or recover the job, then clean up safely."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "colab-remote"
-      description: "Typed Google Colab CLI and optional SSH tools"
+      description: "Typed Colab compute, notebook, resumable file, monitoring, recovery, and optional SSH tools"

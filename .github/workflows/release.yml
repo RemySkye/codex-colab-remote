@@ -10,14 +10,35 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Verify ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+          python-version: "3.12"
+      - run: python plugins/colab-remote/scripts/validate_repo.py
+      - run: uv run --project plugins/colab-remote ruff check plugins/colab-remote
+      - run: uv run --project plugins/colab-remote python -m unittest discover -s plugins/colab-remote/tests -v
+      - if: runner.os != 'Windows'
+        shell: bash
+        run: bash -n install.sh
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build archive and checksum
         run: |
           mkdir dist
-          zip -r "dist/colab-remote-${{ github.ref_name }}.zip" .agents plugins install.ps1 README.md SECURITY.md CHANGELOG.md LICENSE
+          zip -r "dist/colab-remote-${{ github.ref_name }}.zip" .agents plugins docs install.ps1 install.sh README.md SECURITY.md CONTRIBUTING.md CHANGELOG.md LICENSE
           cd dist
           sha256sum "colab-remote-${{ github.ref_name }}.zip" > SHA256SUMS
       - uses: anchore/sbom-action@v0

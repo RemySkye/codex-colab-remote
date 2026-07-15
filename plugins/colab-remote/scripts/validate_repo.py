@@ -19,10 +19,14 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+manifest = json.loads(
+    (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+)
 if manifest.get("name") != "colab-remote":
     fail("plugin name must be colab-remote")
-if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", str(manifest.get("version", ""))):
+if not re.fullmatch(
+    r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", str(manifest.get("version", ""))
+):
     fail("plugin version is not valid semver")
 if manifest.get("mcpServers") != "./.mcp.json":
     fail("plugin must reference .mcp.json")
@@ -30,8 +34,16 @@ if manifest.get("mcpServers") != "./.mcp.json":
 mcp_config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
 if set(mcp_config.get("mcpServers", {})) != {"colab-remote"}:
     fail(".mcp.json must expose only colab-remote")
+launcher = mcp_config["mcpServers"]["colab-remote"]
+if launcher.get("command") != "uv" or "--project" not in launcher.get("args", []):
+    fail(".mcp.json must use the portable uv launcher")
 
 required = [
+    REPOSITORY_ROOT / "install.ps1",
+    REPOSITORY_ROOT / "install.sh",
+    REPOSITORY_ROOT / ".gitleaks.toml",
+    REPOSITORY_ROOT / "docs" / "installation.md",
+    REPOSITORY_ROOT / "docs" / "troubleshooting.md",
     ROOT / "scripts" / "colab.ps1",
     ROOT / "scripts" / "runtime.ps1",
     ROOT / "scripts" / "run_mcp.ps1",
@@ -40,7 +52,7 @@ required = [
 ]
 for path in required:
     if not path.exists():
-        fail(f"required file is missing: {path.relative_to(ROOT)}")
+        fail(f"required file is missing: {path.relative_to(REPOSITORY_ROOT)}")
 
 for obsolete in (
     ROOT / "assets" / "bootstrap_colab.py.tmpl",
@@ -52,7 +64,9 @@ for obsolete in (
         fail(f"obsolete credential/tunnel helper remains: {obsolete.relative_to(ROOT)}")
 
 marketplace = json.loads(
-    (REPOSITORY_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
+    (REPOSITORY_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(
+        encoding="utf-8"
+    )
 )
 entries = {entry.get("name"): entry for entry in marketplace.get("plugins", [])}
 entry = entries.get("colab-remote")
@@ -77,11 +91,14 @@ secret_patterns = {
     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----": "private key",
 }
 for path in REPOSITORY_ROOT.rglob("*"):
-    if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
+    if any(part in IGNORED_PARTS for part in path.parts) or not path.is_file():
         continue
     if path.resolve() == Path(__file__).resolve():
         continue
-    if path.suffix.lower() not in TEXT_SUFFIXES and path.name not in {"LICENSE", ".gitignore"}:
+    if path.suffix.lower() not in TEXT_SUFFIXES and path.name not in {
+        "LICENSE",
+        ".gitignore",
+    }:
         continue
     text = path.read_text(encoding="utf-8")
     for needle, description in banned.items():

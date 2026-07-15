@@ -1,4 +1,5 @@
 import sys
+import shutil
 import unittest
 from pathlib import Path
 
@@ -28,16 +29,18 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("credential_status", names)
         self.assertIn("start_job", names)
 
-    @unittest.skipUnless(sys.platform == "win32", "PowerShell launcher is Windows-specific")
-    async def test_plugin_powershell_launcher(self):
+    async def test_plugin_portable_uv_launcher(self):
+        uv = shutil.which("uv")
+        self.assertIsNotNone(uv, "uv is required for the portable MCP launcher test")
         parameters = StdioServerParameters(
-            command="powershell",
+            command=str(uv),
             args=[
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(ROOT / "scripts" / "run_mcp.ps1"),
+                "run",
+                "--isolated",
+                "--project",
+                str(ROOT),
+                "python",
+                str(ROOT / "mcp" / "server.py"),
             ],
             cwd=ROOT,
         )

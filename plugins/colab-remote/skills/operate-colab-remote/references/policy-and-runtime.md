@@ -1,15 +1,23 @@
 # Policy and runtime constraints
 
 - Use Google's official Colab CLI with OAuth2 only. Never use Google Cloud ADC or service-account credentials.
+- Treat gcloud and Colab CLI authentication as separate. A gcloud login does not authenticate ngrok and is not required for `terminal_exec`.
 - Authentication is user-driven. Codex may show the command but must not receive the authorization code or token.
 - Colab capacity, runtime duration, idle behavior, accelerator access, and usage limits are controlled by Google and the user's plan. Do not promise a particular GPU or uninterrupted runtime.
 - A heartbeat keeps the monitored process observable; it does not bypass Colab idle or usage policies.
-- The current CLI has no high-RAM request flag. Measure allocated memory and report it honestly.
-- Julia runs best-effort inside the Python-based VM after an explicit, user-approved Juliaup LTS installation.
+- The current CLI omits High-RAM, runtime-version, and language flags. The plugin's narrow compatibility wrapper selects the native Colab options and kernels. Measure memory and report it because Google controls which hardware combinations are honored.
+- Prefer the latest runtime version. Use an older `YYYY.MM` label only when the user needs it and Google still offers it.
+- Python, R, and Julia use Colab's native preinstalled kernels: `python3`, `ir`, and `julia`. Python is the default. No language installer or external-download approval is required.
 - `/content` is ephemeral. Checkpoint valuable work to approved persistent storage and download results before stopping.
+- A maximum lifetime is a local cleanup timer, not a guarantee that Google will keep the runtime alive until then. Stop-after-job should remain off when follow-up work is expected.
+- Automatic recovery is explicitly opt-in and bounded because it can allocate paid compute again. It can restart saved commands but cannot restore memory or ephemeral files; commands with external side effects must be designed for safe retries.
+- Recovery job recipes stay in owner-only local state. Do not put credentials directly in job command text; use approved environment or secret mechanisms.
+- Managed transfers keep verified chunks after failure or cancellation for resume and remove bulky local chunks after success. Folder archives are path-checked before extraction.
+- Google Drive mounting may require interactive user authorization. Never request, capture, or log its authorization material.
 - Local file access is disabled unless a directory is explicitly allowlisted. Keep the allowlist narrow.
 - GPU and TPU work can consume paid compute units or limited quota. Always obtain cost acknowledgement before allocation.
 - Google says SSH shells are disallowed on free managed runtimes without a positive compute-unit balance and may be terminated. Optional SSH therefore requires the user to confirm a paid plan with positive compute units.
 - Optional SSH creates a public ngrok TCP endpoint. It must stay disabled unless explicitly requested and acknowledged, use only the pinned host key and short-lived key pair, and be closed when work finishes.
 - The ngrok token stays in a user-authorized Colab Secret. Never ask the user to paste it into Codex, return it, or store it in plugin configuration.
 - SSH is intentionally unprivileged. Use the typed official-CLI tools for privileged setup; never add sudo/root access or weaken password, host-key, or forwarding restrictions.
+- Prefer `terminal_exec` for arbitrary Linux work. It uses the official Colab channel and avoids a public inbound endpoint.

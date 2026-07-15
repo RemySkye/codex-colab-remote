@@ -1,0 +1,12 @@
+title = "Colab Remote secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Pinned ngrok signing-key checksum is public integrity metadata, not a credential"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''plugins/colab-remote/assets/bootstrap_ssh\.py\.tmpl''']
+regexes = ['''NGROK_KEY_SHA256\s*=\s*"8a57c28e1779e2a8e5bba3865fffd6805e15898988c235eae862f3069c3f2c28"''']

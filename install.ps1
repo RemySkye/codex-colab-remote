@@ -3,8 +3,12 @@ param(
     [string] $Distro = 'Ubuntu',
     [ValidateSet('cpu', 't4', 'l4', 'g4', 'h100', 'a100', 'v5e1', 'v6e1')]
     [string] $DefaultAccelerator = 'cpu',
-    [ValidateSet('python', 'julia')]
+    [ValidateSet('python', 'julia', 'r')]
     [string] $DefaultLanguage = 'python',
+    [ValidatePattern('^(latest|20\d{2}\.\d{2})$')]
+    [string] $DefaultRuntimeVersion = 'latest',
+    [ValidateRange(0, 1440)]
+    [int] $DefaultMaxLifetimeMinutes = 0,
     [switch] $PreferHighRam,
     [string[]] $AllowedLocalRoot = @(),
     [switch] $DisableNotifications,
@@ -126,9 +130,11 @@ $config = [ordered]@{
     distro = $Distro
     default_accelerator = $DefaultAccelerator
     default_language = $DefaultLanguage
+    default_runtime_version = $DefaultRuntimeVersion
     prefer_high_ram = [bool] $PreferHighRam
     default_timeout_seconds = 3600
     compute_warning_minutes = 60
+    default_max_lifetime_minutes = $DefaultMaxLifetimeMinutes
     notifications_enabled = -not [bool] $DisableNotifications
     require_cost_acknowledgement = $true
     allowed_local_roots = @($approvedRoots | Sort-Object -Unique)

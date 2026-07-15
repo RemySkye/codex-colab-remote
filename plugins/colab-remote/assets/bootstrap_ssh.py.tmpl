@@ -100,9 +100,9 @@ repository_path.write_text(
 os.chmod(repository_path, 0o644)
 run(["apt-get", "update", "-qq"])
 run(["apt-get", "install", "-y", "-qq", "ngrok"])
-ngrok = "/usr/bin/ngrok"
-if not Path(ngrok).is_file():
-    raise RuntimeError("The signed ngrok package did not install /usr/bin/ngrok")
+ngrok = shutil.which("ngrok")
+if not ngrok or not Path(ngrok).is_file():
+    raise RuntimeError("The signed ngrok package did not install an ngrok executable")
 
 try:
     token = userdata.get(SECRET_NAME)

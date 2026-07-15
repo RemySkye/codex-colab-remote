@@ -1,8 +1,14 @@
 {
   "mcpServers": {
     "colab-remote": {
-      "command": "powershell",
-      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${__dirname}/scripts/run_mcp.ps1"]
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "${__dirname}",
+        "python",
+        "${__dirname}/mcp/server.py"
+      ]
     }
   }
 }

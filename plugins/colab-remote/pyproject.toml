@@ -1,6 +1,6 @@
 [project]
 name = "codex-colab-remote"
-version = "0.5.0"
+version = "0.6.0"
 description = "Secure MCP tools for authorized Google Colab sessions"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.20,<2"]

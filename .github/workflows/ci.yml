@@ -4,13 +4,23 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   test:
-    runs-on: windows-latest
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -20,14 +30,28 @@ jobs:
       - name: Validate repository and secrets
         run: python plugins/colab-remote/scripts/validate_repo.py
       - name: Parse PowerShell scripts
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
             [void][scriptblock]::Create((Get-Content -Raw -LiteralPath $_.FullName))
           }
       - name: Test installer with mocked commands
+        if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/installer-smoke.ps1
+      - name: Parse and inspect POSIX installer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash -n install.sh
+          bash install.sh --help
+      - name: Install the official Colab CLI
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          uv tool install --force google-colab-cli==0.6.0
+          "$HOME/.local/bin/colab" version
       - name: Lint
         run: uv run --project plugins/colab-remote ruff check plugins/colab-remote
       - name: Unit and MCP protocol tests

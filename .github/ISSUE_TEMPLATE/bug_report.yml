@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible Colab Remote problem without sensitive data
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Never include OAuth codes/tokens, session URLs, private keys, ngrok credentials, personal paths, or unredacted logs.
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows with WSL2, Ubuntu/Linux, macOS]
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include minimal redacted output and the expected result.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true

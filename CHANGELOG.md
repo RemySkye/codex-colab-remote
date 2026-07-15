@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+- Added native Linux and macOS operation plus a portable `uv` MCP launcher and POSIX installer.
+- Added GitHub-hosted Windows, Ubuntu, and macOS validation and real CLI installation checks.
+- Added native Python, R, and Julia selection, High-RAM/runtime-version controls, and session lifetimes.
+- Added notebook/Drive workflows, resumable parallel folder transfers, safe cancellation, and recovery.
+- Added complete public documentation, troubleshooting, Wiki sources, and full-history secret scanning.
+
 ## 0.5.0
 
 - Added an optional direct SSH terminal and SCP workflow through an ngrok TCP endpoint.

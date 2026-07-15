@@ -1,7 +1,7 @@
 {
   "name": "colab-remote",
-  "version": "0.5.0",
-  "description": "Secure typed tools and optional key-only SSH for operating Google Colab.",
+  "version": "0.6.0+codex.20260715144817",
+  "description": "Operate Colab compute, notebooks, resumable files, recoverable jobs, and optional SSH.",
   "author": {
     "name": "RemySkye",
     "url": "https://github.com/RemySkye"
@@ -9,18 +9,32 @@
   "homepage": "https://github.com/RemySkye/codex-colab-remote",
   "repository": "https://github.com/RemySkye/codex-colab-remote",
   "license": "MIT",
-  "keywords": ["colab", "codex", "gpu", "tpu", "wsl"],
+  "keywords": [
+    "colab",
+    "codex",
+    "gpu",
+    "tpu",
+    "windows",
+    "linux",
+    "macos"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Colab Remote",
-    "shortDescription": "Securely operate authorized Colab runtimes.",
-    "longDescription": "Typed OAuth2-only Colab CLI tools plus an explicitly enabled, short-lived, key-only SSH tunnel for direct terminal work.",
+    "shortDescription": "Operate authorized Colab runtimes and SSH.",
+    "longDescription": "Typed OAuth2-only Colab tools for hardware, High-RAM, runtime versions, Python, R, Julia, notebooks, Drive, resumable files, recoverable jobs, and optional short-lived key-only SSH.",
     "developerName": "RemySkye",
     "category": "Developer Tools",
     "capabilities": [
       "Official Colab CLI",
       "Accelerator provisioning",
+      "High-RAM and runtime versions",
+      "Python, R, and Julia execution",
+      "Automatic Linux terminal without SSH",
       "Restricted files and execution",
+      "Resumable parallel file and folder transfers",
+      "Notebook editing and Google Drive",
+      "Session lifetime and automatic recovery",
       "Progress and completion notifications",
       "Optional key-only SSH terminal"
     ],
