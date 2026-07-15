@@ -6,6 +6,7 @@
 - Added explicit policy/public-tunnel acknowledgements, short-lived Ed25519 keys, host-key pinning, and automatic cleanup.
 - Restricted SSH to an unprivileged key-only account with password, root, sudo, and forwarding disabled.
 - Kept the ngrok token inside a user-authorized Colab Secret so Codex never receives it.
+- Serialized per-session CLI operations so progress monitoring and interactive tools cannot race, and forced UTF-8-safe subprocess decoding on Windows.
 
 ## 0.4.0
 

@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 SERVER_PATH = Path(__file__).resolve().parents[1] / "mcp" / "server.py"
@@ -23,6 +23,20 @@ class ServerTests(unittest.TestCase):
             server._run(["example"])
         self.assertEqual(run.call_args.kwargs["stdin"], server.subprocess.DEVNULL)
         self.assertNotIn("input", run.call_args.kwargs)
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
+
+    def test_colab_serializes_session_operations(self):
+        lock = MagicMock()
+        lock.__enter__.return_value = None
+        with patch.object(server, "_require_credentials"), patch.object(
+            server, "_colab_path", return_value="/home/test/.local/bin/colab"
+        ), patch.object(server, "_wsl", side_effect=[completed(), completed(stdout="ok")]), patch.object(
+            server, "_session_cli_lock", return_value=lock
+        ) as session_lock:
+            result = server._colab(["exec", "-s", "test-session"], input_text="print(1)")
+        self.assertEqual(result.stdout, "ok")
+        session_lock.assert_called_once_with("test-session", 300)
 
     def test_expected_tools_are_registered(self):
         names = {tool.name for tool in server.mcp._tool_manager.list_tools()}

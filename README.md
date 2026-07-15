@@ -2,6 +2,8 @@
 
 Securely let Codex create and operate Google Colab runtimes through Google's official Colab CLI. An optional, explicitly enabled SSH mode adds a direct terminal and file transfer through ngrok.
 
+SSH is never required: provisioning, code, files, packages, logs, monitored jobs, notifications, kernel restart, and cleanup all work through the official CLI. SSH is an extra option for direct terminal and SCP workflows.
+
 ## What it adds
 
 - CPU, T4, L4, G4, H100, A100, TPU v5e-1, or TPU v6e-1 session creation

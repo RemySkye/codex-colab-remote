@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -70,6 +71,8 @@ mcp = FastMCP(
 
 _monitor_lock = threading.Lock()
 _monitors: dict[str, dict[str, Any]] = {}
+_cli_lock_guard = threading.Lock()
+_cli_thread_locks: dict[str, threading.Lock] = {}
 
 
 def _redact(value: str) -> str:
@@ -231,6 +234,8 @@ def _run(
     run_kwargs: dict[str, Any] = {
         "capture_output": True,
         "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
         "timeout": timeout,
         "check": False,
         "env": env,
@@ -250,6 +255,66 @@ def _run(
         detail = _redact((result.stderr or result.stdout or f"exit code {result.returncode}").strip())
         raise RuntimeError(detail)
     return result
+
+
+@contextmanager
+def _session_cli_lock(session_name: str, timeout_seconds: int):
+    """Serialize Colab CLI operations for one runtime across threads and processes."""
+    session = _validate_session_name(session_name)
+    with _cli_lock_guard:
+        thread_lock = _cli_thread_locks.setdefault(session, threading.Lock())
+    if not thread_lock.acquire(timeout=timeout_seconds):
+        raise RuntimeError(f"Timed out waiting for another Colab operation on session {session}")
+
+    stream = None
+    try:
+        _secure_state_root()
+        lock_root = STATE_ROOT / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_root / f"{session}.lock"
+        stream = lock_path.open("a+b")
+        if stream.seek(0, os.SEEK_END) == 0:
+            stream.write(b"\0")
+            stream.flush()
+        try:
+            os.chmod(lock_path, 0o600)
+        except OSError:
+            pass
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"Timed out waiting for another Colab operation on session {session}"
+                    ) from exc
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    finally:
+        if stream is not None:
+            stream.close()
+        thread_lock.release()
 
 
 def _distro() -> str:
@@ -319,22 +384,26 @@ def _colab(
     path = _colab_path()
     if _wsl(["test", "-x", path], timeout=10, check=False).returncode != 0:
         raise RuntimeError("Google Colab CLI is not installed in the configured WSL distribution")
-    return _wsl(
-        [
-            "env",
-            "-u",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "-u",
-            "CLOUDSDK_CONFIG",
-            path,
-            "--auth",
-            "oauth2",
-            *arguments,
-        ],
-        input_text=input_text,
-        timeout=timeout,
-        check=check,
-    )
+    command = [
+        "env",
+        "-u",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "-u",
+        "CLOUDSDK_CONFIG",
+        path,
+        "--auth",
+        "oauth2",
+        *arguments,
+    ]
+    session = None
+    if "-s" in arguments:
+        index = arguments.index("-s")
+        if index + 1 < len(arguments):
+            session = _validate_session_name(arguments[index + 1])
+    if session is None:
+        return _wsl(command, input_text=input_text, timeout=timeout, check=check)
+    with _session_cli_lock(session, max(30, min(timeout, 300))):
+        return _wsl(command, input_text=input_text, timeout=timeout, check=check)
 
 
 def _output(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
