@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string] $Distro = 'Ubuntu',
-    [ValidateSet('cpu', 't4', 'l4', 'g4', 'h100', 'a100', 'v5e1', 'v6e1')]
+    [ValidateSet('cpu', 't4', 'l4', 'g4', 'h100', 'a100', 'v5e-1', 'v6e-1')]
     [string] $DefaultAccelerator = 'cpu',
     [ValidateSet('python', 'julia', 'r')]
     [string] $DefaultLanguage = 'python',
@@ -13,7 +13,6 @@ param(
     [string[]] $AllowedLocalRoot = @(),
     [switch] $DisableNotifications,
     [switch] $EnableSshTunnel,
-    [string] $SshSecretName = 'NGROK_AUTHTOKEN',
     [switch] $SkipAuthentication,
     [switch] $RunSmokeTest,
     [string] $StateRoot = (Join-Path $HOME '.codex\colab-remote')
@@ -67,9 +66,6 @@ function Install-WindowsUv {
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'This bootstrap currently supports Windows 10/11 with WSL2.'
-}
-if ($SshSecretName -notmatch '^[A-Za-z][A-Za-z0-9_]{2,63}$') {
-    throw 'SshSecretName must start with a letter and contain only letters, numbers, and underscores.'
 }
 
 Write-Step 'Checking WSL2 and Ubuntu'
@@ -131,7 +127,7 @@ $config = [ordered]@{
     default_accelerator = $DefaultAccelerator
     default_language = $DefaultLanguage
     default_runtime_version = $DefaultRuntimeVersion
-    prefer_high_ram = [bool] $PreferHighRam
+    default_high_ram = [bool] $PreferHighRam
     default_timeout_seconds = 3600
     compute_warning_minutes = 60
     default_max_lifetime_minutes = $DefaultMaxLifetimeMinutes
@@ -139,7 +135,6 @@ $config = [ordered]@{
     require_cost_acknowledgement = $true
     allowed_local_roots = @($approvedRoots | Sort-Object -Unique)
     ssh_tunnel_enabled = [bool] $EnableSshTunnel
-    ssh_secret_name = $SshSecretName
 }
 $configJson = ($config | ConvertTo-Json -Depth 4) + "`n"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)

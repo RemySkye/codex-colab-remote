@@ -11,18 +11,18 @@ Use the `colab-remote` MCP tools. Do not read tokens, handle authorization codes
 
 1. Call `doctor` and `credential_status`.
 2. If authentication is missing, call `authentication_instructions`. The user must run the command and complete Google sign-in in their own trusted terminal. Never ask them to paste a code into Codex.
-3. Call `get_config`. Confirm the requested accelerator, language, High-RAM setting, runtime version, maximum lifetime, and local-file roots. Prefer `runtime_version=latest` unless the user needs a reproducible older image. A maximum lifetime of zero disables the plugin timer.
-4. Explain the quota/compute warning and get explicit approval before `create_session(..., acknowledge_cost=true)`.
+3. Call `get_config`. Confirm the requested accelerator, language, High-RAM setting, runtime version, maximum lifetime, and local-file roots. Prefer `runtime_version="latest"` unless the user needs a reproducible older image. A maximum lifetime of zero disables the plugin timer.
+4. Explain the quota/compute warning and get explicit approval. Then call `create_session` with `acknowledge_cost=true`, `high_ram=true` or `false`, and the confirmed settings.
 
-Supported accelerators are CPU, T4, L4, G4, H100, A100, TPU v5e-1, and TPU v6e-1. Availability depends on the user's Colab plan and capacity. Set High-RAM explicitly on or off; Google may reject or ignore unsupported combinations, so report measured memory.
+Use only these accelerator values: `cpu`, `t4`, `l4`, `g4`, `h100`, `a100`, `v5e-1`, and `v6e-1`. Use only `python`, `r`, or `julia` for language. Availability depends on the user's plan and capacity. Google may reject or ignore unsupported High-RAM combinations, so report measured memory from the result.
 
 ## Execute work
 
 - Use `execute_code` for short Python, R, or Julia code.
-- Python, R, and Julia use Colab's native preinstalled kernels (`python3`, `ir`, and `julia`). Python is the default. `create_session` verifies the selected kernel; `prepare_language` can switch to or recheck another native kernel without downloading anything.
+- Python, R, and Julia use Colab's native kernels (`python3`, `ir`, and `julia`). Python is the default. `create_session` verifies the selected kernel; call `prepare_language` only to switch or recheck a kernel. It never installs or downloads a language.
 - Use `execute_file` for an approved local script. Local access is off by default and restricted to `allowed_local_roots`.
 - Use `terminal_exec` for arbitrary Linux shell commands. It is automatic over the official Colab CLI and requires no ngrok token, public tunnel, or SSH setup. Use tmux or `start_job` for persistent commands.
-- Use `upload_file` and `download_file` for small single files. For large files or folders use `start_upload` or `start_download`, then `transfer_status`. These managed transfers support compression, parallel chunks, resume, and checksum verification. Use `cancel_transfer(confirm=true)` for cooperative cancellation and `resume_transfer` to continue completed chunks. Never broaden approved roots without explicit confirmation through `set_config`.
+- Use `upload_file` and `download_file` for single files up to 64 MiB. For larger files or folders, use `start_upload` or `start_download`, save the returned `transfer_id`, then call `transfer_status`. Managed transfers support compression, 1-8 parallel chunks, resume, and checksum verification. Use `cancel_transfer(confirm=true)` for cooperative cancellation and `resume_transfer` to continue completed chunks. Never broaden approved roots without explicit confirmation through `set_config`.
 - Use `create_notebook`, `read_notebook`, and the cell tools to create and edit local nbformat 4 notebooks. `run_notebook_cells` runs selected cells on the session and saves outputs locally. Use `import_notebook` for a validated local copy and `export_session_notebook` to export session history.
 - Use `mount_google_drive`, `save_notebook_to_drive`, and `load_notebook_from_drive` for notebook persistence in MyDrive. The official Drive mount may require the user to complete an interactive Google authorization step. Never attempt to capture that authorization material.
 - Use `install_packages` only after reviewing package names with the user when they are untrusted or expensive to install.

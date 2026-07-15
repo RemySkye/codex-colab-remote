@@ -64,9 +64,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("$stopExitCode", installer)
         self.assertIn("$sessionListing", installer)
         self.assertIn("cleanup could not be verified", installer)
-        posix_installer = (REPOSITORY_ROOT / "install.sh").read_text(
-            encoding="utf-8"
-        )
+        posix_installer = (REPOSITORY_ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("smoke_cleanup", posix_installer)
         self.assertIn("cleanup could not be verified", posix_installer)
 
@@ -113,6 +111,19 @@ class RepositoryTests(unittest.TestCase):
             "wiki/Home.md",
         ):
             self.assertTrue((REPOSITORY_ROOT / relative).is_file(), relative)
+
+    def test_posix_one_liner_is_short_and_interactive(self):
+        readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+        command = (
+            'bash -c "$(curl -fsSL '
+            'https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.sh)"'
+        )
+        self.assertEqual(readme.count(command), 2)
+        self.assertNotIn('tmp="$(mktemp)"', readme)
+        self.assertNotIn(
+            "curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.sh | bash",
+            readme,
+        )
 
 
 if __name__ == "__main__":

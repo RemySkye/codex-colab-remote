@@ -71,7 +71,7 @@ def main() -> int:
             name,
             accelerator="cpu",
             language="python",
-            prefer_high_ram=False,
+            high_ram=False,
             runtime_version="latest",
             max_lifetime_minutes=15,
             acknowledge_cost=True,
@@ -83,7 +83,7 @@ def main() -> int:
                 "requested_accelerator",
                 "language",
                 "runtime_version",
-                "prefer_high_ram",
+                "high_ram_requested",
             )
         }
         report["python"] = server.execute_code(

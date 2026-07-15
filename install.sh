@@ -15,7 +15,6 @@ DEFAULT_MAX_LIFETIME="0"
 PREFER_HIGH_RAM="false"
 NOTIFICATIONS_ENABLED="true"
 SSH_TUNNEL_ENABLED="false"
-SSH_SECRET_NAME="NGROK_AUTHTOKEN"
 SKIP_AUTHENTICATION="false"
 RUN_SMOKE_TEST="false"
 STATE_ROOT="${HOME}/.codex/colab-remote"
@@ -26,7 +25,7 @@ usage() {
 Usage: ./install.sh [options]
 
 Options:
-  --default-accelerator VALUE   cpu, t4, l4, g4, h100, a100, v5e1, or v6e1
+  --default-accelerator VALUE   cpu, t4, l4, g4, h100, a100, v5e-1, or v6e-1
   --default-language VALUE      python, r, or julia
   --runtime-version VALUE       latest or YYYY.MM
   --max-lifetime MINUTES        0-1440; 0 disables the plugin timer
@@ -34,7 +33,6 @@ Options:
   --allowed-root PATH           Allow local file access under PATH; repeatable
   --disable-notifications       Store notification history without desktop popups
   --enable-ssh                  Enable the optional ngrok SSH feature
-  --ssh-secret-name NAME        Colab Secret name; default NGROK_AUTHTOKEN
   --skip-authentication         Install now and authenticate later
   --run-smoke-test              Briefly allocate a CPU runtime and verify cleanup
   --state-root PATH             Override ~/.codex/colab-remote
@@ -77,8 +75,6 @@ while [ "$#" -gt 0 ]; do
       NOTIFICATIONS_ENABLED="false"; shift ;;
     --enable-ssh)
       SSH_TUNNEL_ENABLED="true"; shift ;;
-    --ssh-secret-name)
-      require_value "$@"; SSH_SECRET_NAME="$2"; shift 2 ;;
     --skip-authentication)
       SKIP_AUTHENTICATION="true"; shift ;;
     --run-smoke-test)
@@ -93,7 +89,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$DEFAULT_ACCELERATOR" in
-  cpu|t4|l4|g4|h100|a100|v5e1|v6e1) ;;
+  cpu|t4|l4|g4|h100|a100|v5e-1|v6e-1) ;;
   *) fail "Unsupported default accelerator: $DEFAULT_ACCELERATOR" ;;
 esac
 case "$DEFAULT_LANGUAGE" in
@@ -104,9 +100,6 @@ esac
   fail "Runtime version must be latest or YYYY.MM"
 [[ "$DEFAULT_MAX_LIFETIME" =~ ^[0-9]+$ ]] || fail "Max lifetime must be a number"
 [ "$DEFAULT_MAX_LIFETIME" -le 1440 ] || fail "Max lifetime cannot exceed 1440 minutes"
-[[ "$SSH_SECRET_NAME" =~ ^[A-Za-z][A-Za-z0-9_]{2,63}$ ]] ||
-  fail "SSH secret name must contain only letters, numbers, and underscores"
-
 case "$(uname -s)" in
   Linux|Darwin) ;;
   *) fail "Use install.ps1 on Windows; install.sh supports Linux and macOS" ;;
@@ -179,7 +172,6 @@ export COLAB_REMOTE_MAX_LIFETIME="$DEFAULT_MAX_LIFETIME"
 export COLAB_REMOTE_PREFER_HIGH_RAM="$PREFER_HIGH_RAM"
 export COLAB_REMOTE_NOTIFICATIONS="$NOTIFICATIONS_ENABLED"
 export COLAB_REMOTE_SSH_ENABLED="$SSH_TUNNEL_ENABLED"
-export COLAB_REMOTE_SSH_SECRET_NAME="$SSH_SECRET_NAME"
 export COLAB_REMOTE_ROOTS_FILE="$ROOTS_FILE"
 "$UV_BIN" run --no-project --python 3.12 python - <<'PY'
 import json
@@ -193,7 +185,7 @@ config = {
     "default_accelerator": os.environ["COLAB_REMOTE_DEFAULT_ACCELERATOR"],
     "default_language": os.environ["COLAB_REMOTE_DEFAULT_LANGUAGE"],
     "default_runtime_version": os.environ["COLAB_REMOTE_RUNTIME_VERSION"],
-    "prefer_high_ram": os.environ["COLAB_REMOTE_PREFER_HIGH_RAM"] == "true",
+    "default_high_ram": os.environ["COLAB_REMOTE_PREFER_HIGH_RAM"] == "true",
     "default_timeout_seconds": 3600,
     "compute_warning_minutes": 60,
     "default_max_lifetime_minutes": int(os.environ["COLAB_REMOTE_MAX_LIFETIME"]),
@@ -201,7 +193,6 @@ config = {
     "require_cost_acknowledgement": True,
     "allowed_local_roots": roots,
     "ssh_tunnel_enabled": os.environ["COLAB_REMOTE_SSH_ENABLED"] == "true",
-    "ssh_secret_name": os.environ["COLAB_REMOTE_SSH_SECRET_NAME"],
 }
 path = Path(os.environ["COLAB_REMOTE_STATE_ROOT"]) / "config.json"
 temporary = path.with_suffix(".tmp")
