@@ -33,9 +33,11 @@ class ServerTests(unittest.TestCase):
                 "create_session",
                 "credential_status",
                 "doctor",
+                "disable_ssh",
                 "download_file",
                 "execute_code",
                 "execute_file",
+                "enable_ssh",
                 "get_config",
                 "get_logs",
                 "install_packages",
@@ -49,6 +51,11 @@ class ServerTests(unittest.TestCase):
                 "session_status",
                 "session_url",
                 "set_config",
+                "ssh_download",
+                "ssh_exec",
+                "ssh_requirements",
+                "ssh_status",
+                "ssh_upload",
                 "start_job",
                 "stop_job",
                 "stop_session",
@@ -89,6 +96,118 @@ class ServerTests(unittest.TestCase):
                 allowed_local_roots=[temporary], confirm_sensitive_change=True
             )
             self.assertEqual(result["allowed_local_roots"], [str(Path(temporary).resolve())])
+
+    def test_config_requires_confirmation_to_enable_ssh(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            server, "STATE_ROOT", Path(temporary) / "state"
+        ), patch.object(server, "CONFIG_PATH", Path(temporary) / "state" / "config.json"), patch.object(
+            server, "_secure_state_root", lambda: (Path(temporary) / "state").mkdir(parents=True, exist_ok=True)
+        ):
+            with self.assertRaises(PermissionError):
+                server.set_config(ssh_tunnel_enabled=True)
+            result = server.set_config(ssh_tunnel_enabled=True, confirm_sensitive_change=True)
+        self.assertTrue(result["ssh_tunnel_enabled"])
+
+    def test_ssh_requires_config_and_two_acknowledgements(self):
+        disabled = {**server.DEFAULT_CONFIG, "ssh_tunnel_enabled": False}
+        enabled = {**server.DEFAULT_CONFIG, "ssh_tunnel_enabled": True}
+        with patch.object(server, "_load_config", return_value=disabled), self.assertRaises(PermissionError):
+            server.enable_ssh("test-session", True, True)
+        with patch.object(server, "_load_config", return_value=enabled), self.assertRaises(PermissionError):
+            server.enable_ssh("test-session")
+        with patch.object(server, "_load_config", return_value=enabled), self.assertRaises(PermissionError):
+            server.enable_ssh("test-session", acknowledge_colab_policy=True)
+
+    def test_ssh_bootstrap_and_client_are_key_only_and_pinned(self):
+        template = (SERVER_PATH.parents[1] / "assets" / "bootstrap_ssh.py.tmpl").read_text(encoding="utf-8")
+        self.assertIn("PasswordAuthentication no", template)
+        self.assertIn("AuthenticationMethods publickey", template)
+        self.assertIn('["usermod", "-p", "*", "codex"]', template)
+        self.assertIn("PermitRootLogin no", template)
+        self.assertIn("AllowTcpForwarding no", template)
+        self.assertNotIn("NOPASSWD", template)
+        self.assertNotIn('"config", "add-authtoken"', template)
+        self.assertIn("json.dumps(token)", template)
+        state = {
+            "private_key": "key",
+            "port": 1234,
+            "known_hosts": "known",
+            "host": "example.test",
+        }
+        arguments = server._ssh_base(state)
+        self.assertIn("StrictHostKeyChecking=yes", arguments)
+        self.assertIn("BatchMode=yes", arguments)
+
+    def test_redacts_labeled_ngrok_tokens(self):
+        self.assertEqual(
+            server._redact("NGROK_AUTHTOKEN=not-a-real-token"),
+            "NGROK_AUTHTOKEN=[REDACTED]",
+        )
+        self.assertEqual(server._redact("authtoken: secret-value"), "authtoken: [REDACTED]")
+
+    def test_disable_ssh_retains_retry_state_when_remote_revoke_fails(self):
+        with patch.object(server, "_remote_shell", side_effect=RuntimeError("runtime unavailable")), patch.object(
+            server, "_delete_local_ssh_state"
+        ) as delete_state:
+            result = server.disable_ssh("test-session", confirm=True)
+        self.assertFalse(result["closed"])
+        self.assertTrue(result["retry_required"])
+        self.assertFalse(result["private_key_deleted"])
+        delete_state.assert_not_called()
+
+    def test_stop_session_deletes_retry_state_after_verified_vm_stop(self):
+        failed_cleanup = {
+            "closed": False,
+            "remote_revoked": False,
+            "private_key_deleted": False,
+            "retry_required": True,
+        }
+        with patch.object(server, "_ssh_state_path") as state_path, patch.object(
+            server, "disable_ssh", return_value=failed_cleanup
+        ), patch.object(server, "_colab", side_effect=[completed(), completed()]), patch.object(
+            server, "_delete_local_ssh_state"
+        ) as delete_state, patch.object(server, "_load_session_ledger", return_value={}), patch.object(
+            server, "_save_session_ledger"
+        ):
+            state_path.return_value.exists.return_value = True
+            result = server.stop_session("test-session", confirm=True)
+        delete_state.assert_called_once_with("test-session")
+        self.assertTrue(result["ssh_cleanup"]["closed"])
+        self.assertTrue(result["ssh_cleanup"]["terminated_by_session_stop"])
+
+    def test_enable_ssh_registers_verified_manifest(self):
+        host_key = "ssh-ed25519 " + server.base64.b64encode(b"0" * 32).decode()
+        manifest = {
+            "session_name": "test-session",
+            "nonce": "fixed-nonce",
+            "endpoint": "tcp://example.test:12345",
+            "host_key": host_key,
+            "host_fingerprint": "SHA256:test",
+            "runtime": {"actual_gpu": None},
+        }
+
+        def fake_run(arguments, **_kwargs):
+            if arguments[0] == "ssh-keygen":
+                key = Path(arguments[-1])
+                key.write_text("private", encoding="utf-8")
+                key.with_suffix(".pub").write_text("ssh-ed25519 AAAA test", encoding="utf-8")
+                return completed()
+            return completed("CODEX_SSH_OK")
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            server, "SSH_ROOT", Path(temporary) / "ssh"
+        ), patch.object(
+            server, "_load_config", return_value={**server.DEFAULT_CONFIG, "ssh_tunnel_enabled": True}
+        ), patch.object(server.shutil, "which", return_value="present"), patch.object(
+            server.secrets, "token_urlsafe", return_value="fixed-nonce"
+        ), patch.object(
+            server, "_colab", return_value=completed("CODEX_SSH_MANIFEST=" + server.json.dumps(manifest))
+        ), patch.object(server, "_run", side_effect=fake_run), patch.object(server, "_secure_state_root"):
+            result = server.enable_ssh("test-session", True, True)
+            state = server._load_ssh_state("test-session")
+        self.assertTrue(result["connected"])
+        self.assertEqual(state["host"], "example.test")
+        self.assertFalse(result["root_access"])
 
     def test_local_file_access_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(

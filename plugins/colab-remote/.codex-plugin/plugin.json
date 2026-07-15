@@ -1,7 +1,7 @@
 {
   "name": "colab-remote",
-  "version": "0.4.0",
-  "description": "Secure typed tools for operating Google Colab through Google's official CLI.",
+  "version": "0.5.0",
+  "description": "Secure typed tools and optional key-only SSH for operating Google Colab.",
   "author": {
     "name": "RemySkye",
     "url": "https://github.com/RemySkye"
@@ -14,14 +14,15 @@
   "interface": {
     "displayName": "Colab Remote",
     "shortDescription": "Securely operate authorized Colab runtimes.",
-    "longDescription": "Typed, OAuth2-only tools around Google's official Colab CLI for provisioning, execution, files, jobs, progress, notifications, logs, and cleanup.",
+    "longDescription": "Typed OAuth2-only Colab CLI tools plus an explicitly enabled, short-lived, key-only SSH tunnel for direct terminal work.",
     "developerName": "RemySkye",
     "category": "Developer Tools",
     "capabilities": [
       "Official Colab CLI",
       "Accelerator provisioning",
       "Restricted files and execution",
-      "Progress and completion notifications"
+      "Progress and completion notifications",
+      "Optional key-only SSH terminal"
     ],
     "defaultPrompt": "Use $operate-colab-remote to run this safely on my authorized Google Colab runtime."
   },

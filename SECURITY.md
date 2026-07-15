@@ -9,13 +9,18 @@ Report vulnerabilities privately through this repository's GitHub Security Advis
 - Authentication happens in the user's terminal; there is no code-handoff helper.
 - Local files are inaccessible unless their parent directory is explicitly allowlisted.
 - Destructive cleanup and external Julia installation require confirmation.
-- Common Google secrets, private keys, old tunnel code, and hardcoded user paths are blocked by validation and CI.
+- Common Google secrets and hardcoded user paths are blocked by validation and CI.
+- SSH is disabled by default and needs separate acknowledgements for Colab policy and public-tunnel risk.
+- SSH uses a fresh Ed25519 key, strict host-key pinning, key-only login, and an unprivileged account. Password, root, sudo, agent, X11, and TCP forwarding are disabled.
+- The ngrok token is read only inside Colab from the user-authorized `NGROK_AUTHTOKEN` Secret. It is not passed to or returned by Codex, and the temporary ngrok config is deleted after startup.
 
 ## Boundaries
 
 Codex and the Colab CLI run as your local OS user. Any process running as that same user could technically access files that user can access. The plugin reduces accidental exposure but cannot defend against an already-compromised Windows account, WSL distribution, dependency, or Google account.
 
 Remote commands intentionally have full control of the allocated Colab VM. Keep sensitive local directories out of `allowed_local_roots`, review untrusted code, and use a separate Google account for stronger isolation.
+
+Optional SSH creates a public ngrok TCP endpoint and trusts Google Colab and ngrok as service providers. The SSH user is intentionally not root; use typed Colab tools for privileged work. Anyone who obtains the local private key while the tunnel is active could access that runtime. The plugin cannot protect a key from a compromised local OS account.
 
 ## Credential storage and revocation
 
@@ -28,6 +33,8 @@ wsl -d Ubuntu -- sh -lc 'rm -f ~/.config/colab-cli/token.json'
 ```
 
 Also revoke the application's access from your Google Account security page if a credential might be exposed. Then authenticate again from a trusted terminal.
+
+If SSH material might be exposed, call `disable_ssh` or stop the Colab session immediately and rotate the ngrok token in the ngrok dashboard. Local retry state is deleted only after remote revocation or VM termination is confirmed. Never include the private key, ngrok token, endpoint, or complete SSH logs in a bug report.
 
 ## Release safety
 

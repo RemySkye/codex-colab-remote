@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -18,11 +20,13 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 STATE_ROOT = Path(os.environ.get("COLAB_REMOTE_STATE_DIR", Path.home() / ".codex" / "colab-remote"))
 CONFIG_PATH = STATE_ROOT / "config.json"
 NOTIFICATIONS_PATH = STATE_ROOT / "notifications.jsonl"
 SESSIONS_PATH = STATE_ROOT / "sessions.json"
 MONITORS_ROOT = STATE_ROOT / "monitors"
+SSH_ROOT = STATE_ROOT / "ssh"
 
 ACCELERATORS = {"cpu", "T4", "L4", "G4", "H100", "A100", "v5e1", "v6e1"}
 LANGUAGES = {"python", "julia"}
@@ -36,6 +40,8 @@ SENSITIVE_PATTERNS = [
         re.compile(r'(?i)("(?:token|access_token|id_token|refresh_token|client_secret)"\s*:\s*")[^"]+'),
         r"\1[REDACTED]",
     ),
+    (re.compile(r"(?i)(NGROK_AUTHTOKEN\s*[=:]\s*)\S+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(authtoken\s*:\s*)\S+"), r"\1[REDACTED]"),
 ]
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
@@ -49,13 +55,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "notifications_enabled": True,
     "require_cost_acknowledgement": True,
     "allowed_local_roots": [],
+    "ssh_tunnel_enabled": False,
+    "ssh_secret_name": "NGROK_AUTHTOKEN",
 }
 
 mcp = FastMCP(
     "colab-remote",
     instructions=(
         "Use only Google's official Colab CLI with OAuth2. Never request, read, print, or transmit "
-        "Google authorization codes, token files, gcloud credentials, or Application Default Credentials."
+        "Google authorization codes, token files, gcloud credentials, Application Default Credentials, or ngrok "
+        "tokens. Optional SSH must remain user-approved, key-only, host-key-pinned, and short-lived."
     ),
 )
 
@@ -90,7 +99,7 @@ def _secure_state_root() -> None:
             if result.returncode != 0:
                 raise PermissionError("Could not restrict the Colab Remote state directory to the current user")
             marker = STATE_ROOT / ".acl-secured"
-            marker.write_text("state contains configuration and notification metadata only\n", encoding="utf-8")
+            marker.write_text("owner-only Colab Remote state; may include short-lived SSH keys\n", encoding="utf-8")
             try:
                 os.chmod(marker, 0o600)
             except OSError:
@@ -402,6 +411,125 @@ def _validate_remote_path(path: str) -> str:
     return path
 
 
+def _ssh_dir(session_name: str) -> Path:
+    return SSH_ROOT / _validate_session_name(session_name)
+
+
+def _ssh_state_path(session_name: str) -> Path:
+    return _ssh_dir(session_name) / "state.json"
+
+
+def _load_ssh_state(session_name: str) -> dict[str, Any]:
+    path = _ssh_state_path(session_name)
+    if not path.exists():
+        raise ValueError(f"SSH is not enabled for session: {session_name}")
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict) or state.get("session_name") != session_name:
+        raise ValueError("Invalid local SSH state")
+    return state
+
+
+def _save_ssh_state(state: dict[str, Any]) -> None:
+    _secure_state_root()
+    directory = _ssh_dir(str(state["session_name"]))
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    target = directory / "state.json"
+    temporary = directory / f"state.{os.getpid()}.tmp"
+    temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(temporary, 0o600)
+    except OSError:
+        pass
+    os.replace(temporary, target)
+
+
+def _delete_local_ssh_state(session_name: str) -> None:
+    directory = _ssh_dir(session_name).resolve()
+    expected_parent = SSH_ROOT.resolve()
+    if directory.parent != expected_parent:
+        raise PermissionError("Refusing to clean SSH state outside the SSH state root")
+    if not directory.exists():
+        return
+    for name in ("id_ed25519", "id_ed25519.pub", "known_hosts", "state.json"):
+        (directory / name).unlink(missing_ok=True)
+    for temporary in directory.glob("state.*.tmp"):
+        temporary.unlink(missing_ok=True)
+    directory.rmdir()
+
+
+def _ssh_base(state: dict[str, Any]) -> list[str]:
+    return [
+        "ssh",
+        "-i",
+        str(state["private_key"]),
+        "-p",
+        str(state["port"]),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={state['known_hosts']}",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ServerAliveInterval=20",
+        "-o",
+        "ServerAliveCountMax=3",
+        f"codex@{state['host']}",
+    ]
+
+
+def _scp_base(state: dict[str, Any]) -> list[str]:
+    return [
+        "scp",
+        "-i",
+        str(state["private_key"]),
+        "-P",
+        str(state["port"]),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={state['known_hosts']}",
+        "-o",
+        "ConnectTimeout=15",
+    ]
+
+
+def _ssh_run(state: dict[str, Any], command: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+    encoded = base64.b64encode(command.encode()).decode()
+    remote = f"printf %s {shlex.quote(encoded)} | base64 -d | bash"
+    return _run(_ssh_base(state) + [remote], timeout=timeout)
+
+
+def _render_ssh_bootstrap(
+    session_name: str,
+    nonce: str,
+    public_key: str,
+    secret_name: str,
+) -> str:
+    template = (PLUGIN_ROOT / "assets" / "bootstrap_ssh.py.tmpl").read_text(encoding="utf-8")
+    replacements = {
+        "__SESSION_NAME_JSON__": session_name,
+        "__NONCE_JSON__": nonce,
+        "__PUBLIC_KEY_JSON__": public_key,
+        "__SECRET_NAME_JSON__": secret_name,
+    }
+    for marker, value in replacements.items():
+        template = template.replace(marker, json.dumps(value))
+    return template
+
+
 def _wsl_path(local_path: Path) -> str:
     normalized = str(local_path).replace("\\", "/")
     result = _wsl(["wslpath", "-a", "-u", "--", normalized], timeout=15)
@@ -658,6 +786,8 @@ def set_config(
     compute_warning_minutes: int | None = None,
     notifications_enabled: bool | None = None,
     allowed_local_roots: list[str] | None = None,
+    ssh_tunnel_enabled: bool | None = None,
+    ssh_secret_name: str | None = None,
     distro: str | None = None,
     confirm_sensitive_change: bool = False,
 ) -> dict[str, Any]:
@@ -692,6 +822,16 @@ def set_config(
                 raise ValueError(f"Allowed root must be an existing absolute directory: {root}")
             roots.append(str(path))
         config["allowed_local_roots"] = sorted(set(roots))
+    if ssh_tunnel_enabled is not None:
+        if ssh_tunnel_enabled and not confirm_sensitive_change:
+            raise PermissionError("The user must explicitly confirm enabling a public SSH tunnel")
+        config["ssh_tunnel_enabled"] = ssh_tunnel_enabled
+    if ssh_secret_name is not None:
+        if not confirm_sensitive_change:
+            raise PermissionError("The user must explicitly confirm changing the Colab tunnel secret name")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,63}", ssh_secret_name):
+            raise ValueError("Invalid Colab secret name")
+        config["ssh_secret_name"] = ssh_secret_name
     _save_config(config)
     return config
 
@@ -740,6 +880,9 @@ def doctor() -> dict[str, Any]:
     checks["local_file_access_enabled"] = bool(checks["config"]["allowed_local_roots"])
     checks["high_ram_supported_by_cli"] = False
     checks["julia_mode"] = "Best-effort Juliaup LTS inside a Python-based Colab VM"
+    checks["ssh_tunnel_enabled"] = bool(checks["config"]["ssh_tunnel_enabled"])
+    checks["openssh_client_present"] = all(shutil.which(name) for name in ("ssh", "scp", "ssh-keygen"))
+    checks["ssh_policy"] = "Managed-runtime SSH requires a paid plan with a positive compute-unit balance"
     return checks
 
 
@@ -1046,17 +1189,249 @@ def stop_job(session_name: str, job_name: str, confirm: bool = False) -> dict[st
 
 
 @mcp.tool()
+def ssh_requirements() -> dict[str, Any]:
+    """Explain the optional SSH tunnel prerequisites and current local readiness."""
+    config = _load_config()
+    return {
+        "enabled_in_config": bool(config["ssh_tunnel_enabled"]),
+        "tunnel_provider": "ngrok TCP",
+        "colab_secret_name": config["ssh_secret_name"],
+        "openssh_client_present": all(shutil.which(name) for name in ("ssh", "scp", "ssh-keygen")),
+        "policy_warning": (
+            "Google says SSH shells are disallowed on free managed runtimes without a positive Colab compute-unit "
+            "balance and may be terminated. Use a paid plan with positive compute units."
+        ),
+        "security": (
+            "The endpoint is public but accepts only a short-lived key. Passwords, root login, TCP forwarding, "
+            "agent forwarding, and X11 forwarding are disabled. The ngrok token stays in Colab Secrets."
+        ),
+    }
+
+
+@mcp.tool()
+def enable_ssh(
+    session_name: str,
+    acknowledge_colab_policy: bool = False,
+    acknowledge_public_tunnel: bool = False,
+) -> dict[str, Any]:
+    """Enable short-lived, key-only SSH over ngrok for an existing Colab session."""
+    session = _validate_session_name(session_name)
+    config = _load_config()
+    if not config["ssh_tunnel_enabled"]:
+        raise PermissionError(
+            "SSH tunneling is disabled. The user must explicitly enable ssh_tunnel_enabled with set_config."
+        )
+    if not acknowledge_colab_policy:
+        raise PermissionError(
+            "Google restricts SSH on free managed runtimes without positive compute units. Re-run only after the "
+            "user confirms a paid plan with a positive compute-unit balance."
+        )
+    if not acknowledge_public_tunnel:
+        raise PermissionError(
+            "ngrok creates a public TCP endpoint protected by a short-lived SSH key. Re-run only after user approval."
+        )
+    for executable in ("ssh", "scp", "ssh-keygen"):
+        if not shutil.which(executable):
+            raise RuntimeError(f"OpenSSH executable is required: {executable}")
+
+    directory = _ssh_dir(session)
+    if directory.exists():
+        _delete_local_ssh_state(session)
+    directory.mkdir(parents=True, exist_ok=False)
+    private_key = directory / "id_ed25519"
+    try:
+        _run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"colab-remote-{session}", "-f", str(private_key)],
+            timeout=30,
+        )
+        public_key = private_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+        nonce = secrets.token_urlsafe(24)
+        bootstrap = _render_ssh_bootstrap(session, nonce, public_key, str(config["ssh_secret_name"]))
+        result = _colab(
+            ["exec", "-s", session, "--timeout", "900"],
+            input_text=bootstrap,
+            timeout=930,
+        )
+        manifest = _extract_json_marker(result.stdout, "CODEX_SSH_MANIFEST=")
+        if manifest.get("session_name") != session or not secrets.compare_digest(
+            str(manifest.get("nonce", "")), nonce
+        ):
+            raise RuntimeError("SSH bootstrap identity verification failed")
+        endpoint = str(manifest.get("endpoint", ""))
+        match = re.fullmatch(r"tcp://([A-Za-z0-9.-]+):(\d{1,5})", endpoint)
+        if not match:
+            raise RuntimeError("SSH bootstrap returned an invalid ngrok TCP endpoint")
+        host, port_text = match.groups()
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            raise RuntimeError("SSH bootstrap returned an invalid port")
+        host_key = str(manifest.get("host_key", "")).strip()
+        if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+", host_key):
+            raise RuntimeError("SSH bootstrap returned an invalid Ed25519 host key")
+        known_hosts = directory / "known_hosts"
+        known_hosts.write_text(f"[{host}]:{port} {host_key}\n", encoding="utf-8")
+        state = {
+            "session_name": session,
+            "host": host,
+            "port": port,
+            "host_key": host_key,
+            "host_fingerprint": manifest.get("host_fingerprint"),
+            "private_key": str(private_key),
+            "known_hosts": str(known_hosts),
+            "runtime": manifest.get("runtime", {}),
+            "connected": True,
+            "created_at": int(time.time()),
+            "root_access": False,
+        }
+        _save_ssh_state(state)
+        probe = _run(_ssh_base(state) + ["printf CODEX_SSH_OK"], timeout=30)
+        if probe.stdout != "CODEX_SSH_OK":
+            raise RuntimeError("SSH connected but returned an unexpected probe response")
+    except Exception:
+        try:
+            _remote_shell(
+                session,
+                "rm -f /home/codex/.ssh/authorized_keys; "
+                "pkill -x sshd -F /run/sshd_codex.pid 2>/dev/null || true; "
+                "pkill -x ngrok -F /run/codex-ngrok.pid 2>/dev/null || true; "
+                "rm -f /run/sshd_codex.pid /run/codex-ngrok.pid /tmp/.codex-ngrok-*.yml /tmp/codex-ngrok.log",
+                timeout=30,
+            )
+        except Exception:
+            pass
+        _delete_local_ssh_state(session)
+        raise
+
+    terminal_command = (
+        f'ssh -i "{private_key}" -p {port} -o StrictHostKeyChecking=yes '
+        f'-o UserKnownHostsFile="{known_hosts}" codex@{host}'
+    )
+    return {
+        "session_name": session,
+        "connected": True,
+        "runtime": state["runtime"],
+        "host_fingerprint": state["host_fingerprint"],
+        "root_access": False,
+        "terminal_command": terminal_command,
+        "warning": "Keep the Colab session and ngrok tunnel short-lived; call disable_ssh when finished.",
+    }
+
+
+@mcp.tool()
+def ssh_status(session_name: str) -> dict[str, Any]:
+    """Check the optional SSH tunnel without exposing private key material."""
+    session = _validate_session_name(session_name)
+    state = _load_ssh_state(session)
+    try:
+        result = _ssh_run(
+            state,
+            "echo HOST=$(hostname); echo USER=$(id -un); echo UPTIME=$(cut -d. -f1 /proc/uptime)",
+            timeout=30,
+        )
+        return {
+            "session_name": session,
+            "connected": True,
+            "details": _redact(result.stdout.strip()),
+            "runtime": state.get("runtime", {}),
+            "root_access": False,
+        }
+    except Exception as exc:
+        return {"session_name": session, "connected": False, "error": _redact(str(exc))}
+
+
+@mcp.tool()
+def ssh_exec(session_name: str, command: str, timeout_seconds: int = 300) -> dict[str, Any]:
+    """Run an arbitrary shell command through the explicitly enabled SSH tunnel."""
+    if not command.strip():
+        raise ValueError("command cannot be empty")
+    state = _load_ssh_state(_validate_session_name(session_name))
+    result = _ssh_run(state, command, timeout=max(1, min(timeout_seconds, 86400)))
+    return _output(result)
+
+
+@mcp.tool()
+def ssh_upload(session_name: str, local_path: str, remote_path: str) -> dict[str, Any]:
+    """Copy an approved local file or directory to Colab through SCP."""
+    state = _load_ssh_state(_validate_session_name(session_name))
+    source = _allowed_local_path(local_path, must_exist=True)
+    destination = _validate_remote_path(remote_path)
+    arguments = _scp_base(state)
+    if source.is_dir():
+        arguments.append("-r")
+    result = _run(arguments + [str(source), f"codex@{state['host']}:{destination}"], timeout=1800)
+    return {"local_path": str(source), "remote_path": destination, **_output(result)}
+
+
+@mcp.tool()
+def ssh_download(session_name: str, remote_path: str, local_path: str) -> dict[str, Any]:
+    """Copy a remote file or directory from Colab through SCP into an approved local root."""
+    state = _load_ssh_state(_validate_session_name(session_name))
+    source = _validate_remote_path(remote_path)
+    destination = _allowed_local_path(local_path, must_exist=False)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result = _run(
+        _scp_base(state) + ["-r", f"codex@{state['host']}:{source}", str(destination)],
+        timeout=1800,
+    )
+    return {"remote_path": source, "local_path": str(destination), **_output(result)}
+
+
+@mcp.tool()
+def disable_ssh(session_name: str, confirm: bool = False) -> dict[str, Any]:
+    """Revoke the remote SSH key/tunnel and delete the short-lived local private key."""
+    if not confirm:
+        raise PermissionError("Re-run with confirm=true after the user approves closing SSH access")
+    session = _validate_session_name(session_name)
+    remote_revoked = False
+    remote_error = None
+    try:
+        _remote_shell(
+            session,
+            "rm -f /home/codex/.ssh/authorized_keys; "
+            "pkill -x sshd -F /run/sshd_codex.pid 2>/dev/null || true; "
+            "pkill -x ngrok -F /run/codex-ngrok.pid 2>/dev/null || true; "
+            "rm -f /run/sshd_codex.pid /run/codex-ngrok.pid /tmp/.codex-ngrok-*.yml /tmp/codex-ngrok.log",
+            timeout=30,
+        )
+        remote_revoked = True
+    except Exception as exc:
+        remote_error = _redact(str(exc))
+    if remote_revoked:
+        _delete_local_ssh_state(session)
+    return {
+        "session_name": session,
+        "closed": remote_revoked,
+        "remote_revoked": remote_revoked,
+        "remote_error": remote_error,
+        "private_key_deleted": remote_revoked,
+        "retry_required": not remote_revoked,
+    }
+
+
+@mcp.tool()
 def stop_session(session_name: str, confirm: bool = False) -> dict[str, Any]:
     """Stop and release one Colab session after explicit confirmation."""
     if not confirm:
         raise PermissionError("Stopping releases the VM and ephemeral data; re-run with confirm=true after user approval")
     session = _validate_session_name(session_name)
+    ssh_cleanup = disable_ssh(session, confirm=True) if _ssh_state_path(session).exists() else None
     result = _colab(["stop", "-s", session], timeout=120)
     verification = _colab(["sessions"], timeout=30)
     listing = verification.stdout + verification.stderr
     verified_absent = session not in listing
     if not verified_absent:
         raise RuntimeError(f"Colab reported that session {session} still exists after stop")
+    if _ssh_state_path(session).exists():
+        _delete_local_ssh_state(session)
+        if ssh_cleanup is not None:
+            ssh_cleanup.update(
+                {
+                    "closed": True,
+                    "private_key_deleted": True,
+                    "retry_required": False,
+                    "terminated_by_session_stop": True,
+                }
+            )
     ledger = _load_session_ledger()
     ledger.pop(session, None)
     _save_session_ledger(ledger)
@@ -1066,6 +1441,7 @@ def stop_session(session_name: str, confirm: bool = False) -> dict[str, Any]:
         "verified_absent": True,
         "stop": _output(result),
         "sessions_after": _output(verification),
+        "ssh_cleanup": ssh_cleanup,
     }
 
 

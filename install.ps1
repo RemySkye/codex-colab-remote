@@ -8,6 +8,8 @@ param(
     [switch] $PreferHighRam,
     [string[]] $AllowedLocalRoot = @(),
     [switch] $DisableNotifications,
+    [switch] $EnableSshTunnel,
+    [string] $SshSecretName = 'NGROK_AUTHTOKEN',
     [switch] $SkipAuthentication,
     [switch] $RunSmokeTest,
     [string] $StateRoot = (Join-Path $HOME '.codex\colab-remote')
@@ -61,6 +63,9 @@ function Install-WindowsUv {
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'This bootstrap currently supports Windows 10/11 with WSL2.'
+}
+if ($SshSecretName -notmatch '^[A-Za-z][A-Za-z0-9_]{2,63}$') {
+    throw 'SshSecretName must start with a letter and contain only letters, numbers, and underscores.'
 }
 
 Write-Step 'Checking WSL2 and Ubuntu'
@@ -127,6 +132,8 @@ $config = [ordered]@{
     notifications_enabled = -not [bool] $DisableNotifications
     require_cost_acknowledgement = $true
     allowed_local_roots = @($approvedRoots | Sort-Object -Unique)
+    ssh_tunnel_enabled = [bool] $EnableSshTunnel
+    ssh_secret_name = $SshSecretName
 }
 $configJson = ($config | ConvertTo-Json -Depth 4) + "`n"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
@@ -180,6 +187,9 @@ if ($RunSmokeTest) {
 
 Write-Host "`nColab Remote is installed." -ForegroundColor Green
 Write-Host 'Restart Codex or start a new task so it loads the plugin.'
+if ($EnableSshTunnel) {
+    Write-Host 'SSH is opt-in. Add your ngrok token to Colab Secrets and use a paid Colab plan with positive compute units.' -ForegroundColor Yellow
+}
 if ($SkipAuthentication) {
     Write-Host "Authenticate later inside WSL with: umask 077; env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG $linuxColab --auth oauth2 sessions; chmod 600 ~/.config/colab-cli/token.json"
 }

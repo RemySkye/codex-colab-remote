@@ -1,0 +1,178 @@
+# Optional Colab Remote SSH bootstrap. Run only in a Colab VM you control.
+import base64
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import socket
+import subprocess
+import time
+import urllib.request
+from pathlib import Path
+
+from google.colab import userdata
+
+SESSION_NAME = __SESSION_NAME_JSON__
+NONCE = __NONCE_JSON__
+AUTHORIZED_KEY = __PUBLIC_KEY_JSON__
+SECRET_NAME = __SECRET_NAME_JSON__
+NGROK_KEY_SHA256 = "8a57c28e1779e2a8e5bba3865fffd6805e15898988c235eae862f3069c3f2c28"
+os.umask(0o077)
+
+
+def run(args, **kwargs):
+    return subprocess.run(args, check=True, text=True, **kwargs)
+
+
+gpu = ""
+if shutil.which("nvidia-smi"):
+    gpu = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+runtime = {
+    "actual_gpu": gpu or None,
+    "platform": platform.platform(),
+    "hostname": socket.gethostname(),
+}
+
+run(["apt-get", "update", "-qq"])
+run(["apt-get", "install", "-y", "-qq", "ca-certificates", "openssh-server", "tmux"])
+
+if subprocess.run(["id", "-u", "codex"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+    run(["useradd", "-m", "-s", "/bin/bash", "codex"])
+# Keep the account usable for public-key SSH while retaining an impossible password.
+run(["usermod", "-p", "*", "codex"])
+Path("/etc/sudoers.d/codex-colab").unlink(missing_ok=True)
+run(["install", "-d", "-o", "codex", "-g", "codex", "-m", "0750", "/content/codex-ssh"])
+ssh_dir = Path("/home/codex/.ssh")
+ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+authorized = "no-agent-forwarding,no-port-forwarding,no-X11-forwarding " + AUTHORIZED_KEY + "\n"
+(ssh_dir / "authorized_keys").write_text(authorized)
+os.chmod(ssh_dir / "authorized_keys", 0o600)
+run(["chown", "-R", "codex:codex", str(ssh_dir)])
+
+host_key = Path("/etc/ssh/ssh_host_ed25519_key")
+if not host_key.exists():
+    run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(host_key)])
+config = """Port 2222
+ListenAddress 127.0.0.1
+Protocol 2
+HostKey /etc/ssh/ssh_host_ed25519_key
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers codex
+AuthorizedKeysFile .ssh/authorized_keys
+AllowTcpForwarding no
+X11Forwarding no
+PermitTunnel no
+GatewayPorts no
+UsePAM no
+PidFile /run/sshd_codex.pid
+Subsystem sftp internal-sftp
+"""
+Path("/etc/ssh/sshd_config_codex").write_text(config)
+Path("/run/sshd").mkdir(exist_ok=True)
+subprocess.run(
+    ["pkill", "-x", "sshd", "-F", "/run/sshd_codex.pid"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+run(["/usr/sbin/sshd", "-f", "/etc/ssh/sshd_config_codex", "-E", "/tmp/codex-sshd.log"])
+
+key_data = urllib.request.urlopen("https://ngrok-agent.s3.amazonaws.com/ngrok.asc", timeout=30).read()
+if hashlib.sha256(key_data).hexdigest() != NGROK_KEY_SHA256:
+    raise RuntimeError("ngrok repository signing key checksum mismatch")
+key_path = Path("/usr/share/keyrings/ngrok.asc")
+key_path.write_bytes(key_data)
+os.chmod(key_path, 0o644)
+repository_path = Path("/etc/apt/sources.list.d/ngrok.list")
+repository_path.write_text(
+    "deb [signed-by=/usr/share/keyrings/ngrok.asc] https://ngrok-agent.s3.amazonaws.com bookworm main\n"
+)
+os.chmod(repository_path, 0o644)
+run(["apt-get", "update", "-qq"])
+run(["apt-get", "install", "-y", "-qq", "ngrok"])
+ngrok = "/usr/bin/ngrok"
+if not Path(ngrok).is_file():
+    raise RuntimeError("The signed ngrok package did not install /usr/bin/ngrok")
+
+try:
+    token = userdata.get(SECRET_NAME)
+except Exception as exc:
+    raise RuntimeError(
+        f"Add {SECRET_NAME} in Colab Secrets, enable notebook access, and retry enable_ssh."
+    ) from exc
+if not token or len(token) < 20:
+    raise RuntimeError(f"Colab Secret {SECRET_NAME} is missing or invalid")
+
+temporary_config = Path(f"/tmp/.codex-ngrok-{NONCE}.yml")
+temporary_config.write_text("version: 3\nauthtoken: " + json.dumps(token) + "\n")
+del token
+os.chmod(temporary_config, 0o600)
+subprocess.run(
+    ["pkill", "-x", "ngrok", "-F", "/run/codex-ngrok.pid"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+log_path = Path("/tmp/codex-ngrok.log")
+log_stream = log_path.open("w")
+os.chmod(log_path, 0o600)
+try:
+    process = subprocess.Popen(
+        [ngrok, "tcp", "2222", "--config", str(temporary_config), "--log", "stdout"],
+        stdout=log_stream,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+except Exception:
+    temporary_config.unlink(missing_ok=True)
+    raise
+finally:
+    log_stream.close()
+Path("/run/codex-ngrok.pid").write_text(str(process.pid))
+
+endpoint = None
+try:
+    for _ in range(60):
+        time.sleep(1)
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=2) as response:
+                tunnels = json.load(response).get("tunnels", [])
+            endpoint = next((item["public_url"] for item in tunnels if item.get("proto") == "tcp"), None)
+            if endpoint:
+                break
+        except Exception:
+            pass
+finally:
+    temporary_config.unlink(missing_ok=True)
+if not endpoint or not re.fullmatch(r"tcp://[A-Za-z0-9.-]+:\d+", endpoint):
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    raise RuntimeError("ngrok did not create a TCP endpoint; inspect /tmp/codex-ngrok.log")
+
+host_key_parts = Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text().strip().split()
+public_host_key = " ".join(host_key_parts[:2])
+fingerprint_raw = base64.b64decode(public_host_key.split()[1] + "===")
+fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(fingerprint_raw).digest()).decode().rstrip("=")
+manifest = {
+    "session_name": SESSION_NAME,
+    "nonce": NONCE,
+    "endpoint": endpoint,
+    "host_key": public_host_key,
+    "host_fingerprint": fingerprint,
+    "runtime": runtime,
+    "root_access": False,
+}
+print("CODEX_SSH_MANIFEST=" + json.dumps(manifest, separators=(",", ":")))

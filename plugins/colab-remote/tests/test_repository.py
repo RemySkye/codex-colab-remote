@@ -25,7 +25,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(server["command"], "powershell")
         self.assertTrue(any("run_mcp.ps1" in value for value in server["args"]))
 
-    def test_no_auth_handoff_or_tunnel_helpers(self):
+    def test_no_legacy_auth_handoff_helpers(self):
         for relative in (
             "assets/bootstrap_colab.py.tmpl",
             "scripts/start_colab_auth.sh",
@@ -60,6 +60,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("$SkipAuthentication", installer)
         self.assertIn("umask 077", installer)
         self.assertIn("chmod 600", installer)
+        self.assertIn("$EnableSshTunnel", installer)
 
 
 if __name__ == "__main__":

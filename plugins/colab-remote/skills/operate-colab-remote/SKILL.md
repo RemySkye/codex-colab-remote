@@ -1,11 +1,11 @@
 ---
 name: operate-colab-remote
-description: Provision and operate user-authorized Google Colab runtimes from Codex using Google's official CLI. Use for CPU, GPU, TPU, Python or best-effort Julia sessions; remote code and files; monitored jobs; notifications; logs; recovery; and cleanup.
+description: Provision and operate user-authorized Google Colab runtimes from Codex using Google's official CLI, with optional direct key-only SSH. Use for CPU, GPU, TPU, Python or best-effort Julia sessions; remote code and files; monitored jobs; terminal access; notifications; logs; recovery; and cleanup.
 ---
 
 # Operate Colab Remote
 
-Use the `colab-remote` MCP tools. Do not read tokens, handle authorization codes, use Google Cloud ADC, or build an SSH/tunnel fallback.
+Use the `colab-remote` MCP tools. Do not read tokens, handle authorization codes, or use Google Cloud ADC. Prefer the typed official-CLI tools; use optional SSH only when the user explicitly requests direct terminal access.
 
 ## Safe startup
 
@@ -24,6 +24,17 @@ Supported accelerators are CPU, T4, L4, G4, H100, A100, TPU v5e-1, and TPU v6e-1
 - Use `upload_file`, `download_file`, and `list_files` for data. Never broaden approved roots without explicit confirmation through `set_config`.
 - Use `install_packages` only after reviewing package names with the user when they are untrusted or expensive to install.
 
+## Optional SSH terminal
+
+1. Call `ssh_requirements`. Explain that Google may terminate SSH on free managed runtimes without a positive compute-unit balance and that ngrok creates a public TCP endpoint.
+2. The user must add `NGROK_AUTHTOKEN` to Colab Secrets and enable notebook access. Never ask for or accept the token in Codex.
+3. Enable `ssh_tunnel_enabled` through `set_config(..., confirm_sensitive_change=true)` only after explicit user approval.
+4. Call `enable_ssh` with both `acknowledge_colab_policy=true` and `acknowledge_public_tunnel=true` only after the user confirms both warnings.
+5. Use `ssh_status`, `ssh_exec`, `ssh_upload`, and `ssh_download`; `/content/codex-ssh` is the writable SSH workspace. SSH is unprivileged by design, so use typed official-CLI tools for privileged setup instead of weakening SSH.
+6. Call `disable_ssh(confirm=true)` when terminal access is no longer needed. `stop_session` also attempts SSH cleanup.
+
+Do not disable host-key checking, expose a password, grant sudo/root, reveal a private key, or copy the ngrok token out of Colab Secrets.
+
 ## Long jobs
 
 Use `start_job` for long commands. It provides tmux persistence, logs, heartbeat, exit status, optional JSON progress, and a detached local completion watcher. Programs may write JSON to the path in `CODEX_PROGRESS_FILE`.
@@ -36,6 +47,6 @@ For expensive work, recommend checkpointing outputs to persistent storage. Colab
 
 ## Finish and recover
 
-Download required outputs before cleanup. Get confirmation before `stop_job` or `stop_session`. Verify the session is absent afterward.
+Download required outputs before cleanup. Disable SSH if active, get confirmation before `stop_job` or `stop_session`, and verify the session is absent afterward.
 
 Read [policy-and-runtime.md](references/policy-and-runtime.md) for constraints and [recovery.md](references/recovery.md) when work fails.

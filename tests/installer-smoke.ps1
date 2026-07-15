@@ -28,7 +28,7 @@ function global:icacls.exe {
 
 $testState = Join-Path ([IO.Path]::GetTempPath()) ('colab-remote-installer-test-' + [guid]::NewGuid())
 try {
-    & (Join-Path $PSScriptRoot '..\install.ps1') -Distro Ubuntu -StateRoot $testState
+    & (Join-Path $PSScriptRoot '..\install.ps1') -Distro Ubuntu -StateRoot $testState -EnableSshTunnel
     if ($LASTEXITCODE -ne 0) { throw "Installer returned exit code $LASTEXITCODE" }
 
     $calls = $global:InstallerTestCalls -join "`n"
@@ -41,6 +41,9 @@ try {
             throw "Installer did not invoke: $expected`n$calls"
         }
     }
+    $config = Get-Content -Raw (Join-Path $testState 'config.json') | ConvertFrom-Json
+    if (-not $config.ssh_tunnel_enabled) { throw 'Installer did not enable the requested SSH option.' }
+    if ($config.ssh_secret_name -ne 'NGROK_AUTHTOKEN') { throw 'Installer wrote the wrong SSH secret name.' }
     Write-Host 'Installer mock smoke test passed.'
 }
 finally {

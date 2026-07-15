@@ -36,6 +36,7 @@ required = [
     ROOT / "scripts" / "runtime.ps1",
     ROOT / "scripts" / "run_mcp.ps1",
     ROOT / "skills" / "operate-colab-remote" / "SKILL.md",
+    ROOT / "assets" / "bootstrap_ssh.py.tmpl",
 ]
 for path in required:
     if not path.exists():
@@ -65,8 +66,10 @@ banned = {
     "/home/administrator": "hardcoded WSL user",
     "4/0A": "possible OAuth authorization code",
     "--auth adc": "ADC authentication",
-    "ssh_exec": "obsolete SSH tool",
-    "NGROK_AUTHTOKEN": "obsolete tunnel credential",
+    "PasswordAuthentication yes": "password-based SSH authentication",
+    "StrictHostKeyChecking=no": "disabled SSH host-key verification",
+    "PermitRootLogin yes": "SSH root login",
+    "codex ALL=(ALL) NOPASSWD": "passwordless SSH sudo access",
 }
 secret_patterns = {
     r"AIza[0-9A-Za-z_-]{30,}": "Google API key",
