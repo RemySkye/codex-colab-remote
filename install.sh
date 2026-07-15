@@ -26,7 +26,7 @@ usage() {
 Usage: ./install.sh [options]
 
 Options:
-  --default-accelerator VALUE   cpu, t4, l4, g4, h100, a100, v5e1, or v6e1
+  --default-accelerator VALUE   cpu, t4, l4, g4, h100, a100, v5e-1, or v6e-1
   --default-language VALUE      python, r, or julia
   --runtime-version VALUE       latest or YYYY.MM
   --max-lifetime MINUTES        0-1440; 0 disables the plugin timer
@@ -93,7 +93,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$DEFAULT_ACCELERATOR" in
-  cpu|t4|l4|g4|h100|a100|v5e1|v6e1) ;;
+  cpu|t4|l4|g4|h100|a100|v5e-1|v6e-1) ;;
   *) fail "Unsupported default accelerator: $DEFAULT_ACCELERATOR" ;;
 esac
 case "$DEFAULT_LANGUAGE" in
@@ -193,7 +193,7 @@ config = {
     "default_accelerator": os.environ["COLAB_REMOTE_DEFAULT_ACCELERATOR"],
     "default_language": os.environ["COLAB_REMOTE_DEFAULT_LANGUAGE"],
     "default_runtime_version": os.environ["COLAB_REMOTE_RUNTIME_VERSION"],
-    "prefer_high_ram": os.environ["COLAB_REMOTE_PREFER_HIGH_RAM"] == "true",
+    "default_high_ram": os.environ["COLAB_REMOTE_PREFER_HIGH_RAM"] == "true",
     "default_timeout_seconds": 3600,
     "compute_warning_minutes": 60,
     "default_max_lifetime_minutes": int(os.environ["COLAB_REMOTE_MAX_LIFETIME"]),

@@ -17,9 +17,10 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 import managed_transfer
 import notebook_ops
@@ -37,7 +38,7 @@ LEASES_ROOT = STATE_ROOT / "leases"
 SSH_ROOT = STATE_ROOT / "ssh"
 TRANSFERS_ROOT = STATE_ROOT / "transfers"
 
-ACCELERATORS = {"cpu", "T4", "L4", "G4", "H100", "A100", "v5e1", "v6e1"}
+ACCELERATORS = {"cpu", "t4", "l4", "g4", "h100", "a100", "v5e-1", "v6e-1"}
 LANGUAGES = {"python", "julia", "r"}
 DIRECT_TRANSFER_LIMIT = 64 * 1024 * 1024
 TRANSFER_CHUNK_SIZE = 32 * 1024 * 1024
@@ -70,7 +71,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "default_accelerator": "cpu",
     "default_language": "python",
     "default_runtime_version": "latest",
-    "prefer_high_ram": False,
+    "default_high_ram": False,
     "default_timeout_seconds": 3600,
     "compute_warning_minutes": 60,
     "default_max_lifetime_minutes": 0,
@@ -81,12 +82,121 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ssh_secret_name": "NGROK_AUTHTOKEN",
 }
 
+# Reusable public MCP types keep the generated tool schemas precise and compact.
+SessionName = Annotated[
+    str,
+    Field(
+        description="Unique session name: 1-64 letters, digits, dots, underscores, or hyphens.",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+    ),
+]
+JobName = Annotated[
+    str,
+    Field(
+        description="Unique job name within the session; uses the same rules as session names.",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+    ),
+]
+AcceleratorName = Annotated[
+    Literal["cpu", "t4", "l4", "g4", "h100", "a100", "v5e-1", "v6e-1"],
+    Field(
+        description="Colab hardware accelerator. Availability depends on plan and capacity."
+    ),
+]
+LanguageName = Annotated[
+    Literal["python", "r", "julia"],
+    Field(description="Native Colab runtime language. Python is the default."),
+]
+RuntimeVersion = Annotated[
+    str,
+    Field(
+        description="Use 'latest' (recommended) or a pinned Colab runtime in YYYY.MM format.",
+        pattern=r"^(latest|recommended|20\d{2}\.\d{2})$",
+    ),
+]
+TimeoutSeconds = Annotated[
+    int,
+    Field(description="Operation timeout in seconds.", ge=1, le=86400),
+]
+MaxLifetimeMinutes = Annotated[
+    int,
+    Field(
+        description="Maximum session lifetime in minutes; 0 disables automatic shutdown.",
+        ge=0,
+        le=1440,
+    ),
+]
+RemotePath = Annotated[
+    str,
+    Field(
+        description="Absolute path inside the Colab VM; '..' traversal is not allowed."
+    ),
+]
+RemoteWorkdir = Annotated[
+    str,
+    Field(
+        description="Absolute working directory inside the Colab VM; defaults to /content."
+    ),
+]
+LocalPath = Annotated[
+    str,
+    Field(description="Absolute local path under a root approved with set_config."),
+]
+TransferId = Annotated[
+    str,
+    Field(
+        description="Managed transfer identifier returned by start_upload or start_download."
+    ),
+]
+LineCount = Annotated[
+    int,
+    Field(description="Maximum number of recent lines to return.", ge=1, le=5000),
+]
+Parallelism = Annotated[
+    int,
+    Field(description="Number of parallel transfer chunks.", ge=1, le=8),
+]
+OptionalAcceleratorName = Annotated[
+    AcceleratorName | None,
+    Field(description="Colab hardware accelerator; null uses the configured default."),
+]
+OptionalLanguageName = Annotated[
+    LanguageName | None,
+    Field(
+        description="Native Colab language; null uses the session or configured default."
+    ),
+]
+OptionalRuntimeVersion = Annotated[
+    RuntimeVersion | None,
+    Field(
+        description="Use 'latest' (recommended), YYYY.MM, or null for the configured default."
+    ),
+]
+OptionalTimeoutSeconds = Annotated[
+    TimeoutSeconds | None,
+    Field(
+        description="Operation timeout in seconds; null uses the configured default."
+    ),
+]
+OptionalMaxLifetimeMinutes = Annotated[
+    MaxLifetimeMinutes | None,
+    Field(
+        description="Maximum lifetime in minutes; null uses the configured default and 0 disables it."
+    ),
+]
+
 mcp = FastMCP(
     "colab-remote",
     instructions=(
         "Use only Google's official Colab CLI with OAuth2. Never request, read, print, or transmit "
         "Google authorization codes, token files, gcloud credentials, Application Default Credentials, or ngrok "
-        "tokens. Optional SSH must remain user-approved, key-only, host-key-pinned, and short-lived."
+        "tokens. Start with doctor, credential_status, and get_config. Before create_session, explain its "
+        "compute warning and obtain explicit user approval. Prefer execute_code for kernel code and terminal_exec "
+        "for Linux commands. Optional SSH must remain user-approved, key-only, host-key-pinned, and short-lived."
     ),
 )
 
@@ -148,6 +258,9 @@ def _load_config() -> dict[str, Any]:
         loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         if not isinstance(loaded, dict):
             raise ValueError("Colab Remote config must be a JSON object")
+        if "default_high_ram" not in loaded and "prefer_high_ram" in loaded:
+            loaded["default_high_ram"] = bool(loaded["prefer_high_ram"])
+        loaded.pop("prefer_high_ram", None)
         config.update(loaded)
     config["require_cost_acknowledgement"] = True
     return config
@@ -233,7 +346,7 @@ def _record_session(
     session_name: str,
     accelerator: str,
     language: str,
-    prefer_high_ram: bool = False,
+    high_ram_requested: bool = False,
     runtime_version: str = "latest",
     max_lifetime_minutes: int = 0,
     recovery_enabled: bool = False,
@@ -244,7 +357,7 @@ def _record_session(
         "started_at": int(time.time()),
         "accelerator": accelerator,
         "language": language,
-        "prefer_high_ram": prefer_high_ram,
+        "high_ram_requested": high_ram_requested,
         "runtime_version": runtime_version,
         "max_lifetime_minutes": max_lifetime_minutes,
         "expires_at": int(time.time()) + max_lifetime_minutes * 60
@@ -524,23 +637,16 @@ def _output(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 
 def _normalize_accelerator(value: str) -> str:
-    raw = value.strip()
+    raw = value.strip().lower()
     aliases = {
-        "tpu-v5e1": "v5e1",
-        "tpu-v5e-1": "v5e1",
-        "v5e-1": "v5e1",
-        "tpu-v6e1": "v6e1",
-        "tpu-v6e-1": "v6e1",
-        "v6e-1": "v6e1",
+        "tpu-v5e1": "v5e-1",
+        "tpu-v5e-1": "v5e-1",
+        "v5e1": "v5e-1",
+        "tpu-v6e1": "v6e-1",
+        "tpu-v6e-1": "v6e-1",
+        "v6e1": "v6e-1",
     }
-    if raw.lower() in aliases:
-        return aliases[raw.lower()]
-    if raw.lower() == "cpu":
-        normalized = "cpu"
-    elif raw.lower().startswith("v"):
-        normalized = raw.lower()
-    else:
-        normalized = raw.upper()
+    normalized = aliases.get(raw, raw)
     if normalized not in ACCELERATORS:
         raise ValueError(f"accelerator must be one of {sorted(ACCELERATORS)}")
     return normalized
@@ -561,17 +667,17 @@ def _accelerator_args(accelerator: str) -> list[str]:
     if accelerator == "cpu":
         return []
     if accelerator.startswith("v"):
-        return ["--tpu", accelerator]
-    return ["--gpu", accelerator]
+        return ["--tpu", accelerator.replace("-", "")]
+    return ["--gpu", accelerator.upper()]
 
 
-def _cost_warning(accelerator: str, prefer_high_ram: bool) -> str:
+def _cost_warning(accelerator: str, high_ram: bool) -> str:
     parts = [
         f"Requested accelerator: {accelerator}.",
         "Starting any Colab session may consume quota or compute units.",
         "Exact rates and availability are controlled by Google Colab and are not estimated by this plugin.",
     ]
-    if prefer_high_ram:
+    if high_ram:
         parts.append(
             "High-RAM allocation was requested and may consume additional compute units."
         )
@@ -976,7 +1082,12 @@ try {
     elif config["notifications_enabled"] and shutil.which("notify-send"):
         delivered = (
             _run(
-                ["notify-send", "--app-name=Colab Remote", event["title"], event["message"]],
+                [
+                    "notify-send",
+                    "--app-name=Colab Remote",
+                    event["title"],
+                    event["message"],
+                ],
                 timeout=15,
                 check=False,
             ).returncode
@@ -1325,7 +1436,9 @@ def _recover_session_impl(
         session,
         accelerator=str(saved.get("accelerator", "cpu")),
         language=str(saved.get("language", "python")),
-        prefer_high_ram=bool(saved.get("prefer_high_ram")),
+        high_ram=bool(
+            saved.get("high_ram_requested", saved.get("prefer_high_ram", False))
+        ),
         runtime_version=str(saved.get("runtime_version", "latest")),
         max_lifetime_minutes=int(saved.get("max_lifetime_minutes", 0)),
         recovery_enabled=True,
@@ -1379,21 +1492,53 @@ def get_config() -> dict[str, Any]:
 
 @mcp.tool()
 def set_config(
-    default_accelerator: str | None = None,
-    default_language: str | None = None,
-    default_runtime_version: str | None = None,
-    prefer_high_ram: bool | None = None,
-    default_timeout_seconds: int | None = None,
-    compute_warning_minutes: int | None = None,
-    default_max_lifetime_minutes: int | None = None,
-    notifications_enabled: bool | None = None,
-    allowed_local_roots: list[str] | None = None,
-    ssh_tunnel_enabled: bool | None = None,
-    ssh_secret_name: str | None = None,
-    distro: str | None = None,
-    confirm_sensitive_change: bool = False,
+    default_accelerator: OptionalAcceleratorName = None,
+    default_language: OptionalLanguageName = None,
+    default_runtime_version: OptionalRuntimeVersion = None,
+    default_high_ram: Annotated[
+        bool | None,
+        Field(description="Default High-RAM request; false requests standard RAM."),
+    ] = None,
+    default_timeout_seconds: Annotated[
+        int | None,
+        Field(description="Default operation timeout in seconds.", ge=30, le=86400),
+    ] = None,
+    compute_warning_minutes: Annotated[
+        int | None,
+        Field(description="Warn when a session reaches this runtime.", ge=5, le=1440),
+    ] = None,
+    default_max_lifetime_minutes: OptionalMaxLifetimeMinutes = None,
+    notifications_enabled: Annotated[
+        bool | None, Field(description="Enable desktop job-completion notifications.")
+    ] = None,
+    allowed_local_roots: Annotated[
+        list[str] | None,
+        Field(description="Existing absolute local directories the plugin may access."),
+    ] = None,
+    ssh_tunnel_enabled: Annotated[
+        bool | None,
+        Field(
+            description="Enable optional public ngrok SSH; terminal_exec does not require it."
+        ),
+    ] = None,
+    ssh_secret_name: Annotated[
+        str | None,
+        Field(
+            description="Colab Secret name containing the ngrok token; never the token value."
+        ),
+    ] = None,
+    distro: Annotated[
+        str | None,
+        Field(description="WSL distribution on Windows; ignored on Linux and macOS."),
+    ] = None,
+    confirm_sensitive_change: Annotated[
+        bool,
+        Field(
+            description="True only after user approval for local-root or SSH security changes."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
-    """Change defaults. Explicit confirmation is required before enabling local file roots."""
+    """Update supplied defaults; local-root and SSH changes require explicit confirmation."""
     config = _load_config()
     if default_accelerator is not None:
         config["default_accelerator"] = _normalize_accelerator(default_accelerator)
@@ -1406,8 +1551,8 @@ def set_config(
         config["default_runtime_version"] = _normalize_runtime_version(
             default_runtime_version
         )
-    if prefer_high_ram is not None:
-        config["prefer_high_ram"] = prefer_high_ram
+    if default_high_ram is not None:
+        config["default_high_ram"] = default_high_ram
     if default_timeout_seconds is not None:
         config["default_timeout_seconds"] = max(30, min(default_timeout_seconds, 86400))
     if compute_warning_minutes is not None:
@@ -1478,7 +1623,12 @@ def authentication_instructions() -> dict[str, Any]:
 
 
 @mcp.tool()
-def credential_status(validate_with_google: bool = False) -> dict[str, Any]:
+def credential_status(
+    validate_with_google: Annotated[
+        bool,
+        Field(description="Also make a harmless authenticated CLI request to Google."),
+    ] = False,
+) -> dict[str, Any]:
     """Check OAuth presence and file mode without reading or returning token contents."""
     status = _credential_metadata()
     if validate_with_google and status["oauth_token_present"]:
@@ -1550,15 +1700,29 @@ def list_sessions() -> dict[str, Any]:
 
 @mcp.tool()
 def create_session(
-    session_name: str,
-    accelerator: str | None = None,
-    language: str | None = None,
-    prefer_high_ram: bool | None = None,
-    runtime_version: str | None = None,
-    max_lifetime_minutes: int | None = None,
-    recovery_enabled: bool = False,
-    max_recovery_attempts: int = 1,
-    acknowledge_cost: bool = False,
+    session_name: SessionName,
+    accelerator: OptionalAcceleratorName = None,
+    language: OptionalLanguageName = None,
+    high_ram: Annotated[
+        bool | None,
+        Field(
+            description="Request High-RAM (true), standard RAM (false), or use the default (null)."
+        ),
+    ] = None,
+    runtime_version: OptionalRuntimeVersion = None,
+    max_lifetime_minutes: OptionalMaxLifetimeMinutes = None,
+    recovery_enabled: Annotated[
+        bool, Field(description="Allow bounded recreation if the runtime is lost.")
+    ] = False,
+    max_recovery_attempts: Annotated[
+        int, Field(description="Maximum automatic runtime reallocations.", ge=1, le=10)
+    ] = 1,
+    acknowledge_cost: Annotated[
+        bool,
+        Field(
+            description="True only after the user approves possible quota or compute-unit use."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Create a named CPU/GPU/TPU session with explicit quota/cost acknowledgement."""
     config = _load_config()
@@ -1567,7 +1731,7 @@ def create_session(
     selected_language = (language or config["default_language"]).lower()
     if selected_language not in LANGUAGES:
         raise ValueError(f"language must be one of {sorted(LANGUAGES)}")
-    high_ram = config["prefer_high_ram"] if prefer_high_ram is None else prefer_high_ram
+    selected_high_ram = config["default_high_ram"] if high_ram is None else high_ram
     selected_runtime_version = _normalize_runtime_version(
         runtime_version or config["default_runtime_version"]
     )
@@ -1581,7 +1745,7 @@ def create_session(
         ),
     )
     selected_recovery_attempts = max(1, min(max_recovery_attempts, 10))
-    warning = _cost_warning(selected, high_ram)
+    warning = _cost_warning(selected, selected_high_ram)
     if config["require_cost_acknowledgement"] and not acknowledge_cost:
         raise PermissionError(
             warning + " Re-run with acknowledge_cost=true after the user accepts."
@@ -1590,7 +1754,7 @@ def create_session(
     result = _colab(
         ["new", "-s", session, *_accelerator_args(selected)],
         timeout=900,
-        machine_shape="hm" if high_ram else None,
+        machine_shape="hm" if selected_high_ram else None,
         runtime_version=None
         if selected_runtime_version == "latest"
         else selected_runtime_version,
@@ -1608,7 +1772,7 @@ def create_session(
             session,
             selected,
             selected_language,
-            high_ram,
+            selected_high_ram,
             selected_runtime_version,
             selected_max_lifetime,
             recovery_enabled,
@@ -1632,7 +1796,7 @@ def create_session(
         warnings.append(
             "Session was created, but RAM measurement failed. Use session_status to retry."
         )
-    if high_ram and memory.get("gib", 0) < 20:
+    if selected_high_ram and memory.get("gib", 0) < 20:
         measured = f" Allocated RAM is {memory['gib']} GiB." if "gib" in memory else ""
         warnings.append(
             f"Google accepted the request but did not provide a High-RAM VM.{measured}"
@@ -1653,7 +1817,7 @@ def create_session(
         "requested_accelerator": selected,
         "language": selected_language,
         "native_language": native_language,
-        "prefer_high_ram": high_ram,
+        "high_ram_requested": selected_high_ram,
         "runtime_version": selected_runtime_version,
         "max_lifetime_minutes": selected_max_lifetime,
         "recovery_enabled": recovery_enabled,
@@ -1668,7 +1832,7 @@ def create_session(
 
 
 @mcp.tool()
-def session_status(session_name: str) -> dict[str, Any]:
+def session_status(session_name: SessionName) -> dict[str, Any]:
     """Return Colab status plus measured RAM."""
     session = _validate_session_name(session_name)
     result = _colab(["status", "-s", session], timeout=60)
@@ -1692,7 +1856,7 @@ def session_status(session_name: str) -> dict[str, Any]:
 
 @mcp.tool()
 def set_session_lifetime(
-    session_name: str, max_lifetime_minutes: int = 0
+    session_name: SessionName, max_lifetime_minutes: MaxLifetimeMinutes = 0
 ) -> dict[str, Any]:
     """Set or remove an automatic maximum lifetime for an existing session; zero disables it."""
     session = _validate_session_name(session_name)
@@ -1715,7 +1879,7 @@ def set_session_lifetime(
 
 
 @mcp.tool()
-def recovery_status(session_name: str) -> dict[str, Any]:
+def recovery_status(session_name: SessionName) -> dict[str, Any]:
     """Return the saved automatic-recovery recipe without exposing credential contents."""
     session = _validate_session_name(session_name)
     record = _load_session_ledger().get(session)
@@ -1735,7 +1899,13 @@ def recovery_status(session_name: str) -> dict[str, Any]:
 
 @mcp.tool()
 def recover_session(
-    session_name: str, confirm_reallocate: bool = False
+    session_name: SessionName,
+    confirm_reallocate: Annotated[
+        bool,
+        Field(
+            description="True only after user approval to consume quota by reallocating a VM."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Recreate a lost session and restart opted-in jobs from their saved recipes."""
     session = _validate_session_name(session_name)
@@ -1752,28 +1922,31 @@ def recover_session(
 
 @mcp.tool()
 def prepare_language(
-    session_name: str,
-    language: str,
-    acknowledge_external_download: bool = False,
+    session_name: SessionName,
+    language: LanguageName,
 ) -> dict[str, Any]:
-    """Start and verify a native Python, R, or Julia Colab kernel; no download is needed."""
+    """Switch to and verify a native Python, R, or Julia kernel; no installation is performed."""
     session = _validate_session_name(session_name)
     selected = language.lower()
     if selected not in LANGUAGES:
         raise ValueError(f"language must be one of {sorted(LANGUAGES)}")
     result = _initialize_native_language(session, selected)
     result["external_download_required"] = False
-    if acknowledge_external_download:
-        result["acknowledgement_ignored"] = True
     return result
 
 
 @mcp.tool()
 def execute_code(
-    session_name: str,
-    code: str,
-    language: str | None = None,
-    timeout_seconds: int | None = None,
+    session_name: SessionName,
+    code: Annotated[
+        str,
+        Field(
+            description="Source code to run in the selected native kernel.",
+            min_length=1,
+        ),
+    ],
+    language: OptionalLanguageName = None,
+    timeout_seconds: OptionalTimeoutSeconds = None,
 ) -> dict[str, Any]:
     """Execute code in a native Python, R, or Julia Colab kernel."""
     if not code.strip():
@@ -1796,10 +1969,12 @@ def execute_code(
 
 @mcp.tool()
 def terminal_exec(
-    session_name: str,
-    command: str,
-    workdir: str = "/content",
-    timeout_seconds: int | None = None,
+    session_name: SessionName,
+    command: Annotated[
+        str, Field(description="Linux shell command to run on Colab.", min_length=1)
+    ],
+    workdir: RemoteWorkdir = "/content",
+    timeout_seconds: OptionalTimeoutSeconds = None,
 ) -> dict[str, Any]:
     """Run an arbitrary Linux shell command through the official Colab CLI; no SSH or tunnel required."""
     if not command.strip():
@@ -1825,10 +2000,10 @@ def terminal_exec(
 
 @mcp.tool()
 def execute_file(
-    session_name: str,
-    local_path: str,
-    language: str | None = None,
-    timeout_seconds: int | None = None,
+    session_name: SessionName,
+    local_path: LocalPath,
+    language: OptionalLanguageName = None,
+    timeout_seconds: OptionalTimeoutSeconds = None,
 ) -> dict[str, Any]:
     """Execute an approved local Python, R, Julia, or notebook file."""
     source = _allowed_local_path(local_path, must_exist=True)
@@ -1893,10 +2068,14 @@ def _drive_relative_path(path: str) -> str:
 
 @mcp.tool()
 def create_notebook(
-    local_path: str,
-    language: str = "python",
-    title: str | None = None,
-    overwrite: bool = False,
+    local_path: LocalPath,
+    language: LanguageName = "python",
+    title: Annotated[
+        str | None, Field(description="Optional human-readable notebook title.")
+    ] = None,
+    overwrite: Annotated[
+        bool, Field(description="Replace an existing notebook at this path.")
+    ] = False,
 ) -> dict[str, Any]:
     """Create a local nbformat 4 notebook in an approved folder."""
     path = _notebook_path(local_path, must_exist=False)
@@ -1908,7 +2087,12 @@ def create_notebook(
 
 
 @mcp.tool()
-def read_notebook(local_path: str, include_outputs: bool = True) -> dict[str, Any]:
+def read_notebook(
+    local_path: LocalPath,
+    include_outputs: Annotated[
+        bool, Field(description="Include stored cell outputs in the response.")
+    ] = True,
+) -> dict[str, Any]:
     """Read notebook cells, metadata, and optional outputs from an approved local path."""
     path = _notebook_path(local_path, must_exist=True)
     return {
@@ -1919,10 +2103,14 @@ def read_notebook(local_path: str, include_outputs: bool = True) -> dict[str, An
 
 @mcp.tool()
 def add_notebook_cell(
-    local_path: str,
-    cell_type: str,
-    source: str,
-    index: int | None = None,
+    local_path: LocalPath,
+    cell_type: Annotated[
+        Literal["code", "markdown", "raw"], Field(description="Notebook cell type.")
+    ],
+    source: Annotated[str, Field(description="Complete cell source text.")],
+    index: Annotated[
+        int | None, Field(description="Insertion index; null appends the cell.", ge=0)
+    ] = None,
 ) -> dict[str, Any]:
     """Add a code, markdown, or raw cell at an optional index."""
     path = _notebook_path(local_path, must_exist=True)
@@ -1938,10 +2126,13 @@ def add_notebook_cell(
 
 @mcp.tool()
 def edit_notebook_cell(
-    local_path: str,
-    index: int,
-    source: str,
-    cell_type: str | None = None,
+    local_path: LocalPath,
+    index: Annotated[int, Field(description="Zero-based cell index.", ge=0)],
+    source: Annotated[str, Field(description="Replacement cell source text.")],
+    cell_type: Annotated[
+        Literal["code", "markdown", "raw"] | None,
+        Field(description="Optional replacement cell type."),
+    ] = None,
 ) -> dict[str, Any]:
     """Replace one cell's source and optionally its type."""
     path = _notebook_path(local_path, must_exist=True)
@@ -1956,7 +2147,10 @@ def edit_notebook_cell(
 
 
 @mcp.tool()
-def delete_notebook_cell(local_path: str, index: int) -> dict[str, Any]:
+def delete_notebook_cell(
+    local_path: LocalPath,
+    index: Annotated[int, Field(description="Zero-based cell index.", ge=0)],
+) -> dict[str, Any]:
     """Delete one notebook cell."""
     path = _notebook_path(local_path, must_exist=True)
     notebook = notebook_ops.load(path)
@@ -1971,7 +2165,13 @@ def delete_notebook_cell(local_path: str, index: int) -> dict[str, Any]:
 
 @mcp.tool()
 def move_notebook_cell(
-    local_path: str, source_index: int, destination_index: int
+    local_path: LocalPath,
+    source_index: Annotated[
+        int, Field(description="Current zero-based cell index.", ge=0)
+    ],
+    destination_index: Annotated[
+        int, Field(description="New zero-based cell index.", ge=0)
+    ],
 ) -> dict[str, Any]:
     """Move one notebook cell to a new index."""
     path = _notebook_path(local_path, must_exist=True)
@@ -1987,12 +2187,17 @@ def move_notebook_cell(
 
 @mcp.tool()
 def run_notebook_cells(
-    session_name: str,
-    local_path: str,
-    cell_indices: list[int] | None = None,
-    language: str | None = None,
-    timeout_seconds: int | None = None,
-    stop_on_error: bool = True,
+    session_name: SessionName,
+    local_path: LocalPath,
+    cell_indices: Annotated[
+        list[int] | None,
+        Field(description="Zero-based code-cell indices; null runs every code cell."),
+    ] = None,
+    language: OptionalLanguageName = None,
+    timeout_seconds: OptionalTimeoutSeconds = None,
+    stop_on_error: Annotated[
+        bool, Field(description="Stop after the first failing cell.")
+    ] = True,
 ) -> dict[str, Any]:
     """Run selected code cells on Colab and save their outputs into the local notebook."""
     session = _validate_session_name(session_name)
@@ -2085,7 +2290,11 @@ def run_notebook_cells(
 
 @mcp.tool()
 def import_notebook(
-    source_path: str, destination_path: str, overwrite: bool = False
+    source_path: LocalPath,
+    destination_path: LocalPath,
+    overwrite: Annotated[
+        bool, Field(description="Replace an existing destination notebook.")
+    ] = False,
 ) -> dict[str, Any]:
     """Validate and copy an existing local notebook into another approved location."""
     source = _notebook_path(source_path, must_exist=True)
@@ -2103,7 +2312,16 @@ def import_notebook(
 
 @mcp.tool()
 def export_session_notebook(
-    session_name: str, local_path: str, lines: int = 0
+    session_name: SessionName,
+    local_path: LocalPath,
+    lines: Annotated[
+        int,
+        Field(
+            description="History lines to export; 0 exports all available history.",
+            ge=0,
+            le=5000,
+        ),
+    ] = 0,
 ) -> dict[str, Any]:
     """Export Colab session history as a replayable local .ipynb notebook."""
     session = _validate_session_name(session_name)
@@ -2127,7 +2345,7 @@ def export_session_notebook(
 
 @mcp.tool()
 def mount_google_drive(
-    session_name: str, mount_path: str = "/content/drive"
+    session_name: SessionName, mount_path: RemotePath = "/content/drive"
 ) -> dict[str, Any]:
     """Mount the user's Google Drive through the official Colab CLI."""
     session = _validate_session_name(session_name)
@@ -2138,10 +2356,15 @@ def mount_google_drive(
 
 @mcp.tool()
 def save_notebook_to_drive(
-    session_name: str,
-    local_path: str,
-    drive_path: str,
-    mount_if_needed: bool = True,
+    session_name: SessionName,
+    local_path: LocalPath,
+    drive_path: Annotated[
+        str, Field(description="Destination path relative to Google Drive MyDrive.")
+    ],
+    mount_if_needed: Annotated[
+        bool,
+        Field(description="Mount Drive automatically if it is not already mounted."),
+    ] = True,
 ) -> dict[str, Any]:
     """Save an approved local notebook under Google Drive MyDrive."""
     session = _validate_session_name(session_name)
@@ -2169,10 +2392,15 @@ def save_notebook_to_drive(
 
 @mcp.tool()
 def load_notebook_from_drive(
-    session_name: str,
-    drive_path: str,
-    local_path: str,
-    mount_if_needed: bool = True,
+    session_name: SessionName,
+    drive_path: Annotated[
+        str, Field(description="Source path relative to Google Drive MyDrive.")
+    ],
+    local_path: LocalPath,
+    mount_if_needed: Annotated[
+        bool,
+        Field(description="Mount Drive automatically if it is not already mounted."),
+    ] = True,
 ) -> dict[str, Any]:
     """Load a notebook from Google Drive MyDrive into an approved local path."""
     session = _validate_session_name(session_name)
@@ -2228,7 +2456,9 @@ def _transfer_stage(nonce: str) -> Path:
 
 
 @mcp.tool()
-def upload_file(session_name: str, local_path: str, remote_path: str) -> dict[str, Any]:
+def upload_file(
+    session_name: SessionName, local_path: LocalPath, remote_path: RemotePath
+) -> dict[str, Any]:
     """Upload one file from a user-approved local root."""
     source = _allowed_local_path(local_path, must_exist=True)
     if not source.is_file():
@@ -2314,7 +2544,7 @@ def upload_file(session_name: str, local_path: str, remote_path: str) -> dict[st
 
 @mcp.tool()
 def download_file(
-    session_name: str, remote_path: str, local_path: str
+    session_name: SessionName, remote_path: RemotePath, local_path: LocalPath
 ) -> dict[str, Any]:
     """Download into a user-approved local root."""
     destination = _allowed_local_path(local_path, must_exist=False)
@@ -2402,12 +2632,19 @@ def download_file(
 
 @mcp.tool()
 def start_upload(
-    session_name: str,
-    local_path: str,
-    remote_path: str,
-    compress: bool = False,
-    parallelism: int = 4,
-    resume: bool = True,
+    session_name: SessionName,
+    local_path: LocalPath,
+    remote_path: RemotePath,
+    compress: Annotated[
+        bool,
+        Field(
+            description="Compress before transfer; folders are always archived safely."
+        ),
+    ] = False,
+    parallelism: Parallelism = 4,
+    resume: Annotated[
+        bool, Field(description="Reuse verified completed chunks after interruption.")
+    ] = True,
 ) -> dict[str, Any]:
     """Start a resumable parallel file/folder upload, optionally compressed as tar.gz."""
     source = _allowed_local_path(local_path, must_exist=True)
@@ -2431,13 +2668,19 @@ def start_upload(
 
 @mcp.tool()
 def start_download(
-    session_name: str,
-    remote_path: str,
-    local_path: str,
-    compress: bool = False,
-    parallelism: int = 4,
-    resume: bool = True,
-    overwrite: bool = False,
+    session_name: SessionName,
+    remote_path: RemotePath,
+    local_path: LocalPath,
+    compress: Annotated[
+        bool, Field(description="Compress remotely before transfer when beneficial.")
+    ] = False,
+    parallelism: Parallelism = 4,
+    resume: Annotated[
+        bool, Field(description="Reuse verified completed chunks after interruption.")
+    ] = True,
+    overwrite: Annotated[
+        bool, Field(description="Replace an existing local destination.")
+    ] = False,
 ) -> dict[str, Any]:
     """Start a resumable parallel file/folder download, optionally compressed as tar.gz."""
     destination = _allowed_local_path(local_path, must_exist=False)
@@ -2461,13 +2704,19 @@ def start_download(
 
 
 @mcp.tool()
-def transfer_status(transfer_id: str) -> dict[str, Any]:
+def transfer_status(transfer_id: TransferId) -> dict[str, Any]:
     """Return progress, bytes, chunks, and resumable state for a managed transfer."""
     return managed_transfer.load_state(sys.modules[__name__], transfer_id)
 
 
 @mcp.tool()
-def cancel_transfer(transfer_id: str, confirm: bool = False) -> dict[str, Any]:
+def cancel_transfer(
+    transfer_id: TransferId,
+    confirm: Annotated[
+        bool,
+        Field(description="True only after user approval to cancel this transfer."),
+    ] = False,
+) -> dict[str, Any]:
     """Request cooperative cancellation; completed chunks remain available for resume."""
     if not confirm:
         raise PermissionError("Re-run with confirm=true to cancel the transfer safely")
@@ -2483,7 +2732,7 @@ def cancel_transfer(transfer_id: str, confirm: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool()
-def resume_transfer(transfer_id: str) -> dict[str, Any]:
+def resume_transfer(transfer_id: TransferId) -> dict[str, Any]:
     """Resume a cancelled, failed, or interrupted transfer from completed chunks."""
     state = managed_transfer.load_state(sys.modules[__name__], transfer_id)
     if state.get("status") in {"running", "starting", "cancelling"}:
@@ -2493,13 +2742,19 @@ def resume_transfer(transfer_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def list_transfers(limit: int = 50) -> list[dict[str, Any]]:
+def list_transfers(
+    limit: Annotated[
+        int, Field(description="Maximum recent transfers to return.", ge=1, le=200)
+    ] = 50,
+) -> list[dict[str, Any]]:
     """List recent managed transfers and their progress."""
     return managed_transfer.list_states(sys.modules[__name__], limit)
 
 
 @mcp.tool()
-def list_files(session_name: str, remote_path: str = "/content") -> dict[str, Any]:
+def list_files(
+    session_name: SessionName, remote_path: RemotePath = "/content"
+) -> dict[str, Any]:
     """List files on a Colab session."""
     return _output(
         _colab(
@@ -2515,7 +2770,16 @@ def list_files(session_name: str, remote_path: str = "/content") -> dict[str, An
 
 
 @mcp.tool()
-def install_packages(session_name: str, packages: list[str]) -> dict[str, Any]:
+def install_packages(
+    session_name: SessionName,
+    packages: Annotated[
+        list[str],
+        Field(
+            description="Python package specifiers only; URLs and installer options are rejected.",
+            min_length=1,
+        ),
+    ],
+) -> dict[str, Any]:
     """Install validated Python package specifiers on a Colab session."""
     if not packages or any(not SAFE_PACKAGE.fullmatch(item) for item in packages):
         raise ValueError(
@@ -2530,7 +2794,7 @@ def install_packages(session_name: str, packages: list[str]) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_logs(session_name: str, lines: int = 200) -> dict[str, Any]:
+def get_logs(session_name: SessionName, lines: LineCount = 200) -> dict[str, Any]:
     """Return redacted structured Colab CLI history."""
     count = max(1, min(lines, 5000))
     return _output(
@@ -2542,7 +2806,7 @@ def get_logs(session_name: str, lines: int = 200) -> dict[str, Any]:
 
 
 @mcp.tool()
-def session_url(session_name: str) -> dict[str, Any]:
+def session_url(session_name: SessionName) -> dict[str, Any]:
     """Return the browser URL for a running session."""
     return _output(
         _colab(["url", "-s", _validate_session_name(session_name)], timeout=30)
@@ -2550,7 +2814,15 @@ def session_url(session_name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def restart_kernel(session_name: str, confirm: bool = False) -> dict[str, Any]:
+def restart_kernel(
+    session_name: SessionName,
+    confirm: Annotated[
+        bool,
+        Field(
+            description="True only after user approval to lose in-memory kernel state."
+        ),
+    ] = False,
+) -> dict[str, Any]:
     """Restart a session kernel after explicit confirmation; in-memory state is lost."""
     if not confirm:
         raise PermissionError(
@@ -2565,14 +2837,31 @@ def restart_kernel(session_name: str, confirm: bool = False) -> dict[str, Any]:
 
 @mcp.tool()
 def start_job(
-    session_name: str,
-    job_name: str,
-    command: str,
-    workdir: str = "/content",
-    notify_on_completion: bool = True,
-    monitor_interval_seconds: int = 30,
-    stop_session_on_finish: bool = False,
-    recover_on_runtime_loss: bool = False,
+    session_name: SessionName,
+    job_name: JobName,
+    command: Annotated[
+        str,
+        Field(
+            description="Linux shell command for the persistent tmux job.", min_length=1
+        ),
+    ],
+    workdir: RemoteWorkdir = "/content",
+    notify_on_completion: Annotated[
+        bool, Field(description="Send a desktop notification when the job finishes.")
+    ] = True,
+    monitor_interval_seconds: Annotated[
+        int, Field(description="Local monitoring interval in seconds.", ge=10, le=300)
+    ] = 30,
+    stop_session_on_finish: Annotated[
+        bool,
+        Field(description="Release the Colab VM automatically when this job finishes."),
+    ] = False,
+    recover_on_runtime_loss: Annotated[
+        bool,
+        Field(
+            description="Restart this command after approved automatic runtime recovery."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Start a monitored tmux job with optional auto-stop and runtime-loss recovery."""
     if not command.strip():
@@ -2629,13 +2918,15 @@ echo CODEX_JOB_STARTED={job}"""
 
 
 @mcp.tool()
-def job_status(session_name: str, job_name: str) -> dict[str, Any]:
+def job_status(session_name: SessionName, job_name: JobName) -> dict[str, Any]:
     """Return job lifecycle, heartbeat age, and application-written JSON progress."""
     return _job_status_impl(session_name, job_name)
 
 
 @mcp.tool()
-def job_logs(session_name: str, job_name: str, lines: int = 200) -> dict[str, Any]:
+def job_logs(
+    session_name: SessionName, job_name: JobName, lines: LineCount = 200
+) -> dict[str, Any]:
     """Tail stdout and stderr for a background job."""
     session = _validate_session_name(session_name)
     job = _validate_job_name(job_name)
@@ -2659,11 +2950,21 @@ PY"""
 
 @mcp.tool()
 def watch_job(
-    session_name: str,
-    job_name: str,
-    interval_seconds: int = 30,
-    stop_session_on_finish: bool = False,
-    recover_on_runtime_loss: bool = False,
+    session_name: SessionName,
+    job_name: JobName,
+    interval_seconds: Annotated[
+        int, Field(description="Polling interval in seconds.", ge=10, le=300)
+    ] = 30,
+    stop_session_on_finish: Annotated[
+        bool,
+        Field(description="Release the Colab VM automatically when this job finishes."),
+    ] = False,
+    recover_on_runtime_loss: Annotated[
+        bool,
+        Field(
+            description="Restart an opted-in command after approved runtime recovery."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Start a local background monitor and desktop completion notification."""
     return _start_monitor(
@@ -2676,7 +2977,13 @@ def watch_job(
 
 
 @mcp.tool()
-def stop_job(session_name: str, job_name: str, confirm: bool = False) -> dict[str, Any]:
+def stop_job(
+    session_name: SessionName,
+    job_name: JobName,
+    confirm: Annotated[
+        bool, Field(description="True only after user approval to interrupt the job.")
+    ] = False,
+) -> dict[str, Any]:
     """Stop a background job after explicit confirmation."""
     if not confirm:
         raise PermissionError(
@@ -2761,9 +3068,19 @@ def _register_ssh_manifest(
 
 @mcp.tool()
 def prepare_ssh_browser(
-    session_name: str,
-    acknowledge_colab_policy: bool = False,
-    acknowledge_public_tunnel: bool = False,
+    session_name: SessionName,
+    acknowledge_colab_policy: Annotated[
+        bool,
+        Field(
+            description="True after the user confirms paid Colab with positive compute units."
+        ),
+    ] = False,
+    acknowledge_public_tunnel: Annotated[
+        bool,
+        Field(
+            description="True after the user approves a temporary public ngrok endpoint."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Prepare a key and Colab UI bootstrap cell when notebook Secrets are required."""
     session = _validate_session_name(session_name)
@@ -2831,7 +3148,13 @@ def prepare_ssh_browser(
 
 
 @mcp.tool()
-def register_ssh_manifest(session_name: str, manifest_json: str) -> dict[str, Any]:
+def register_ssh_manifest(
+    session_name: SessionName,
+    manifest_json: Annotated[
+        str,
+        Field(description="Only the JSON object printed after CODEX_SSH_MANIFEST=."),
+    ],
+) -> dict[str, Any]:
     """Validate a UI bootstrap manifest, pin its host key, and verify SSH connectivity."""
     session = _validate_session_name(session_name)
     pending = _load_ssh_state(session)
@@ -2858,9 +3181,19 @@ def register_ssh_manifest(session_name: str, manifest_json: str) -> dict[str, An
 
 @mcp.tool()
 def enable_ssh(
-    session_name: str,
-    acknowledge_colab_policy: bool = False,
-    acknowledge_public_tunnel: bool = False,
+    session_name: SessionName,
+    acknowledge_colab_policy: Annotated[
+        bool,
+        Field(
+            description="True after the user confirms paid Colab with positive compute units."
+        ),
+    ] = False,
+    acknowledge_public_tunnel: Annotated[
+        bool,
+        Field(
+            description="True after the user approves a temporary public ngrok endpoint."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Enable short-lived, key-only SSH over ngrok for an existing Colab session."""
     session = _validate_session_name(session_name)
@@ -2989,7 +3322,7 @@ def enable_ssh(
 
 
 @mcp.tool()
-def ssh_status(session_name: str) -> dict[str, Any]:
+def ssh_status(session_name: SessionName) -> dict[str, Any]:
     """Check the optional SSH tunnel without exposing private key material."""
     session = _validate_session_name(session_name)
     state = _load_ssh_state(session)
@@ -3012,7 +3345,12 @@ def ssh_status(session_name: str) -> dict[str, Any]:
 
 @mcp.tool()
 def ssh_exec(
-    session_name: str, command: str, timeout_seconds: int = 300
+    session_name: SessionName,
+    command: Annotated[
+        str,
+        Field(description="Shell command to run through the SSH tunnel.", min_length=1),
+    ],
+    timeout_seconds: TimeoutSeconds = 300,
 ) -> dict[str, Any]:
     """Run an arbitrary shell command through the explicitly enabled SSH tunnel."""
     if not command.strip():
@@ -3023,7 +3361,9 @@ def ssh_exec(
 
 
 @mcp.tool()
-def ssh_upload(session_name: str, local_path: str, remote_path: str) -> dict[str, Any]:
+def ssh_upload(
+    session_name: SessionName, local_path: LocalPath, remote_path: RemotePath
+) -> dict[str, Any]:
     """Copy an approved local file or directory to Colab through SCP."""
     state = _load_ssh_state(_validate_session_name(session_name))
     source = _allowed_local_path(local_path, must_exist=True)
@@ -3039,7 +3379,7 @@ def ssh_upload(session_name: str, local_path: str, remote_path: str) -> dict[str
 
 @mcp.tool()
 def ssh_download(
-    session_name: str, remote_path: str, local_path: str
+    session_name: SessionName, remote_path: RemotePath, local_path: LocalPath
 ) -> dict[str, Any]:
     """Copy a remote file or directory from Colab through SCP into an approved local root."""
     state = _load_ssh_state(_validate_session_name(session_name))
@@ -3054,7 +3394,15 @@ def ssh_download(
 
 
 @mcp.tool()
-def disable_ssh(session_name: str, confirm: bool = False) -> dict[str, Any]:
+def disable_ssh(
+    session_name: SessionName,
+    confirm: Annotated[
+        bool,
+        Field(
+            description="True only after user approval to close SSH and delete its key."
+        ),
+    ] = False,
+) -> dict[str, Any]:
     """Revoke the remote SSH key/tunnel and delete the short-lived local private key."""
     if not confirm:
         raise PermissionError(
@@ -3088,7 +3436,15 @@ def disable_ssh(session_name: str, confirm: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool()
-def stop_session(session_name: str, confirm: bool = False) -> dict[str, Any]:
+def stop_session(
+    session_name: SessionName,
+    confirm: Annotated[
+        bool,
+        Field(
+            description="True only after user approval to release the VM and ephemeral data."
+        ),
+    ] = False,
+) -> dict[str, Any]:
     """Stop and release one Colab session after explicit confirmation."""
     if not confirm:
         raise PermissionError(
@@ -3137,7 +3493,14 @@ def stop_session(session_name: str, confirm: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool()
-def notification_history(limit: int = 20) -> list[dict[str, Any]]:
+def notification_history(
+    limit: Annotated[
+        int,
+        Field(
+            description="Maximum recent notification records to return.", ge=1, le=200
+        ),
+    ] = 20,
+) -> list[dict[str, Any]]:
     """Return recent non-secret completion notification metadata."""
     if not NOTIFICATIONS_PATH.exists():
         return []

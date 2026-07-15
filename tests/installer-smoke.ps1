@@ -47,7 +47,7 @@ try {
     if ($config.default_language -ne 'r') { throw 'Installer did not write the R runtime default.' }
     if ($config.default_runtime_version -ne '2026.04') { throw 'Installer did not write the runtime version default.' }
     if ($config.default_max_lifetime_minutes -ne 90) { throw 'Installer did not write the session lifetime default.' }
-    if (-not $config.prefer_high_ram) { throw 'Installer did not enable High-RAM.' }
+    if (-not $config.default_high_ram) { throw 'Installer did not enable High-RAM.' }
     Write-Host 'Installer mock smoke test passed.'
 }
 finally {

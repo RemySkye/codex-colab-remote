@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1
+
+- Added machine-readable descriptions and limits for every MCP tool parameter.
+- Constrained accelerator, language, runtime-version, cell-type, path, timeout, and parallelism inputs.
+- Standardized public accelerator values and renamed High-RAM inputs to `high_ram` and `default_high_ram`.
+- Removed the obsolete external-download acknowledgement from native language switching.
+- Improved MCP and skill guidance so agents choose the shortest safe workflow.
+- Added protocol tests that prevent ambiguous or undocumented tool schemas from returning.
+- Simplified the Linux/macOS one-line installer while preserving interactive OAuth input.
+
 ## 0.6.0
 
 - Added native Linux and macOS operation plus a portable `uv` MCP launcher and POSIX installer.

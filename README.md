@@ -51,14 +51,16 @@ irm https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.p
 ### Ubuntu/Linux
 
 ```bash
-tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.sh -o "$tmp" && bash "$tmp"; rc=$?; rm -f "$tmp"; exit $rc
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.sh)"
 ```
 
 ### macOS
 
 ```bash
-tmp="$(mktemp)" && curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.sh -o "$tmp" && bash "$tmp"; rc=$?; rm -f "$tmp"; exit $rc
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.sh)"
 ```
+
+This concise command downloads the installer into memory and keeps terminal input available for Google OAuth. Like the Windows one-liner, it executes the repository's current installer; use the documented inspect-and-run method if you want to review it first.
 
 The installer pins `uv` and `google-colab-cli`, installs the Codex plugin, saves owner-only defaults, and starts Google Colab OAuth. Follow the Google link and paste any one-time code only into that terminal—never into Codex, chat, or an issue. Restart Codex or start a new task after installation.
 

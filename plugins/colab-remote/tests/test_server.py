@@ -271,6 +271,21 @@ class ServerTests(unittest.TestCase):
                 result["allowed_local_roots"], [str(Path(temporary).resolve())]
             )
 
+    def test_config_migrates_legacy_high_ram_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            state.mkdir()
+            config_path = state / "config.json"
+            config_path.write_text('{"prefer_high_ram": true}', encoding="utf-8")
+            with (
+                patch.object(server, "STATE_ROOT", state),
+                patch.object(server, "CONFIG_PATH", config_path),
+                patch.object(server, "_secure_state_root"),
+            ):
+                result = server.get_config()
+        self.assertTrue(result["default_high_ram"])
+        self.assertNotIn("prefer_high_ram", result)
+
     def test_config_requires_confirmation_to_enable_ssh(self):
         with (
             tempfile.TemporaryDirectory() as temporary,
@@ -554,10 +569,10 @@ class ServerTests(unittest.TestCase):
             result = server.create_session(
                 "test-session",
                 accelerator="cpu",
-                prefer_high_ram=True,
+                high_ram=True,
                 acknowledge_cost=True,
             )
-        self.assertTrue(result["prefer_high_ram"])
+        self.assertTrue(result["high_ram_requested"])
         self.assertEqual(colab.call_args_list[0].kwargs["machine_shape"], "hm")
 
     def test_create_can_disable_high_ram_and_prefer_latest_runtime(self):
@@ -565,7 +580,7 @@ class ServerTests(unittest.TestCase):
             patch.object(
                 server,
                 "_load_config",
-                return_value={**server.DEFAULT_CONFIG, "prefer_high_ram": True},
+                return_value={**server.DEFAULT_CONFIG, "default_high_ram": True},
             ),
             patch.object(server, "_colab", return_value=completed("ok")) as colab,
             patch.object(
@@ -588,11 +603,11 @@ class ServerTests(unittest.TestCase):
             result = server.create_session(
                 "test-session",
                 accelerator="cpu",
-                prefer_high_ram=False,
+                high_ram=False,
                 runtime_version="latest",
                 acknowledge_cost=True,
             )
-        self.assertFalse(result["prefer_high_ram"])
+        self.assertFalse(result["high_ram_requested"])
         self.assertEqual(result["runtime_version"], "latest")
         self.assertIsNone(colab.call_args_list[0].kwargs["machine_shape"])
         self.assertIsNone(colab.call_args_list[0].kwargs["runtime_version"])

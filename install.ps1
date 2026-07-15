@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string] $Distro = 'Ubuntu',
-    [ValidateSet('cpu', 't4', 'l4', 'g4', 'h100', 'a100', 'v5e1', 'v6e1')]
+    [ValidateSet('cpu', 't4', 'l4', 'g4', 'h100', 'a100', 'v5e-1', 'v6e-1')]
     [string] $DefaultAccelerator = 'cpu',
     [ValidateSet('python', 'julia', 'r')]
     [string] $DefaultLanguage = 'python',
@@ -131,7 +131,7 @@ $config = [ordered]@{
     default_accelerator = $DefaultAccelerator
     default_language = $DefaultLanguage
     default_runtime_version = $DefaultRuntimeVersion
-    prefer_high_ram = [bool] $PreferHighRam
+    default_high_ram = [bool] $PreferHighRam
     default_timeout_seconds = 3600
     compute_warning_minutes = 60
     default_max_lifetime_minutes = $DefaultMaxLifetimeMinutes

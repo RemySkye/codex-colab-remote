@@ -2,6 +2,8 @@
 
 Codex calls these tools automatically; users normally describe the desired outcome in plain language.
 
+Every parameter has a machine-readable description and range. Choice fields are constrained in the MCP schema: accelerators are `cpu`, `t4`, `l4`, `g4`, `h100`, `a100`, `v5e-1`, or `v6e-1`; languages are `python`, `r`, or `julia`. `runtime_version` accepts `latest` or `YYYY.MM`.
+
 ## Setup and sessions
 
 - `doctor`, `credential_status`, `authentication_instructions`
@@ -9,10 +11,14 @@ Codex calls these tools automatically; users normally describe the desired outco
 - `list_sessions`, `create_session`, `session_status`, `set_session_lifetime`, `stop_session`
 - `recovery_status`, `recover_session`
 
+`create_session` uses `high_ram=true` or `false`. `set_config` uses `default_high_ram`. Creating or reallocating a runtime requires explicit cost acknowledgement.
+
 ## Code and terminal
 
 - `prepare_language`, `execute_code`, `execute_file`, `terminal_exec`
 - `install_packages`, `restart_kernel`, `get_logs`, `session_url`
+
+Use `execute_code` for native kernel code and `terminal_exec` for arbitrary Linux commands. `prepare_language` only switches to and verifies a native kernel; it never downloads a runtime.
 
 ## Jobs and notifications
 
