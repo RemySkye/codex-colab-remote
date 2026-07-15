@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3
+
+- Fixed Google Drive mounting so first-use authorization returns immediately, opens Google's approval page, and never exposes authorization URLs, codes, or tokens to the agent.
+- Prevented headless `colab drivemount` calls from blocking while waiting for `/dev/tty`; the mount now starts only after an authorization preflight succeeds.
+- Verified the protected workspace itself instead of treating a partial `/content/drive` directory as a successful mount.
+- Made terminal and Drive helpers reliable for long commands by staging them through the official Colab upload and execution commands.
+- Added regression coverage for Drive authorization, protected workspace bootstrapping, and staged remote execution.
+
 ## 0.6.2
 
 - Replaced duplicated PowerShell and shell installation logic with one cross-platform Python installer and two thin launchers.
