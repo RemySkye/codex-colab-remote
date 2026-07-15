@@ -7,5 +7,6 @@ Colab Remote lets Codex provision and operate authorized Google Colab runtimes o
 - [[Tools]]
 - [[Troubleshooting]]
 - [[Security]]
+- [[Roadmap]]
 
 Normal code, terminal, notebook, job, and file operations do not require SSH. Optional ngrok SSH is disabled by default.

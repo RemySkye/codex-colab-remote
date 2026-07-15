@@ -40,6 +40,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/installer-smoke.ps1
+      - name: Test shared Python installer
+        run: python tests/test_installer.py -v
       - name: Parse and inspect POSIX installer
         if: runner.os != 'Windows'
         shell: bash
@@ -53,6 +55,6 @@ jobs:
           uv tool install --force google-colab-cli==0.6.0
           "$HOME/.local/bin/colab" version
       - name: Lint
-        run: uv run --project plugins/colab-remote ruff check plugins/colab-remote
+        run: uv run --project plugins/colab-remote ruff check plugins/colab-remote install.py tests/test_installer.py
       - name: Unit and MCP protocol tests
         run: uv run --project plugins/colab-remote python -m unittest discover -s plugins/colab-remote/tests -v

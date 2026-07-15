@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Replaced duplicated PowerShell and shell installation logic with one cross-platform Python installer and two thin launchers.
+- Expanded Google Drive support to general files, folders, checkpoints, models, datasets, and notebooks under the dedicated `MyDrive/codex-colab` workspace.
+- Added Drive path traversal, sibling-folder, symlink, root-deletion, and confirmation protections without imposing an automatic-save policy.
+- Made the shared installer safely update existing installations by handling Git/local marketplace differences, repairing stale registrations, verifying replacement installs, and preserving authentication and configuration.
+
 ## 0.6.1
 
 - Added machine-readable descriptions and limits for every MCP tool parameter.

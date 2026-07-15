@@ -15,7 +15,7 @@ Windows, Ubuntu/Linux, and macOS are supported. The same Python MCP server runs 
 - Arbitrary Linux terminal commands without SSH or a public tunnel
 - Monitored jobs, progress, desktop notifications, session lifetimes, cleanup, and opt-in recovery
 - Resumable parallel file/folder transfers with compression, checksums, cancellation, and resume
-- Create, edit, reorder, run, import, and export notebooks; save/load notebooks through Google Drive
+- Sandboxed Google Drive storage for checkpoints, models, datasets, folders, and notebooks
 - Optional short-lived Ed25519 SSH through ngrok, disabled by default
 - OAuth token isolation, restricted local-file roots, output redaction, and cost acknowledgement
 
@@ -24,6 +24,7 @@ See [all MCP tools](docs/tools.md), the [architecture](docs/architecture.md), an
 ## Requirements
 
 - [Codex CLI](https://developers.openai.com/codex/cli)
+- Python 3.11 or newer
 - A Google account with Colab access
 - Windows 10/11 with WSL2 and Ubuntu, or a supported Linux/macOS host
 - `curl` on Linux/macOS (normally already installed)
@@ -60,9 +61,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-rem
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.sh)"
 ```
 
-This concise command downloads the installer into memory and keeps terminal input available for Google OAuth. Like the Windows one-liner, it executes the repository's current installer; use the documented inspect-and-run method if you want to review it first.
+The PowerShell and shell files are small launchers for the same cross-platform `install.py`. They keep terminal input available for Google OAuth. These one-liners execute the repository's current installer; use the documented inspect-and-run method if you want to review it first.
 
-The installer pins `uv` and `google-colab-cli`, installs the Codex plugin, saves owner-only defaults, and starts Google Colab OAuth. Follow the Google link and paste any one-time code only into that terminal—never into Codex, chat, or an issue. Restart Codex or start a new task after installation.
+The shared Python installer pins `uv` and `google-colab-cli`, installs the Codex plugin, saves owner-only defaults, and starts Google Colab OAuth. Follow the Google link and paste any one-time code only into that terminal—never into Codex, chat, or an issue. Restart Codex or start a new task after installation.
+
+## Updating
+
+Run the same one-line installer again. It detects the existing plugin, refreshes a Git marketplace or reuses the configured local development marketplace, validates and installs the new version, and verifies that Codex reports it installed. It does not uninstall the working version first. Existing Google authentication and configuration are preserved; only configuration options explicitly supplied on the new installer command are changed.
 
 ## Example configuration
 
@@ -92,6 +97,8 @@ Ask Codex naturally, for example:
 
 Codex checks authentication and configuration, explains the quota warning, and asks before allocating compute. Normal terminal work uses the official CLI and does not require ngrok. See [Configuration](docs/configuration.md) and [Tool reference](docs/tools.md).
 
+Google Drive tools create and use only `MyDrive/codex-colab`. Codex can save or restore general files and folders there, and training code can checkpoint to the workspace path returned by `mount_google_drive`. The plugin does not impose an autosave schedule; the user or training code controls when saves happen. Google may require a one-time interactive Drive authorization in Colab.
+
 ## Optional SSH
 
 SSH is not needed for commands, packages, files, or long jobs. Enable it only when a program specifically requires SSH/SCP. It needs an ngrok account with TCP endpoint support and a `NGROK_AUTHTOKEN` stored in Colab Secrets; the token is never copied to Codex.
@@ -114,6 +121,7 @@ The SSH account is unprivileged and uses a short-lived key plus strict host-key 
 - [Complete tool reference](docs/tools.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Development and testing](docs/development.md)
+- [Roadmap](docs/roadmap.md)
 - [Security policy](SECURITY.md)
 
 The same guides are published in the repository's GitHub Wiki.
@@ -125,6 +133,7 @@ The same guides are published in the repository's GitHub Wiki.
 - Recovery can recreate opted-in work but cannot restore VM memory or lost ephemeral files.
 - High-RAM/runtime combinations may be unavailable. The plugin reports the measured result.
 - A heartbeat monitors legitimate work; it is not an anti-idle bypass.
+- Google Cloud Storage (GCS) bucket integration is planned rather than included in the current Drive implementation.
 
 ## Contributing
 

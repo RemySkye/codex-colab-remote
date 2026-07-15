@@ -22,6 +22,7 @@ from typing import Annotated, Any, Literal
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
+import drive_ops
 import managed_transfer
 import notebook_ops
 
@@ -136,6 +137,24 @@ RemotePath = Annotated[
         description="Absolute path inside the Colab VM; '..' traversal is not allowed."
     ),
 ]
+DrivePath = Annotated[
+    str,
+    Field(
+        description=(
+            "Path relative to the protected Google Drive folder MyDrive/codex-colab. "
+            "Absolute paths and '..' traversal are rejected."
+        ),
+        max_length=drive_ops.MAX_DRIVE_PATH_LENGTH,
+    ),
+]
+DriveMountPath = Annotated[
+    Literal["/content/drive"],
+    Field(
+        description=(
+            "Fixed internal Drive mount; typed Drive tools expose only MyDrive/codex-colab."
+        )
+    ),
+]
 RemoteWorkdir = Annotated[
     str,
     Field(
@@ -196,7 +215,9 @@ mcp = FastMCP(
         "Google authorization codes, token files, gcloud credentials, Application Default Credentials, or ngrok "
         "tokens. Start with doctor, credential_status, and get_config. Before create_session, explain its "
         "compute warning and obtain explicit user approval. Prefer execute_code for kernel code and terminal_exec "
-        "for Linux commands. Optional SSH must remain user-approved, key-only, host-key-pinned, and short-lived."
+        "for Linux commands. Google Drive tools are restricted to MyDrive/codex-colab; never inspect or modify "
+        "other mounted Drive paths through code or terminal commands. Optional SSH must remain user-approved, "
+        "key-only, host-key-pinned, and short-lived."
     ),
 )
 
@@ -2042,15 +2063,7 @@ def _notebook_path(local_path: str, *, must_exist: bool) -> Path:
 
 
 def _drive_relative_path(path: str) -> str:
-    value = path.strip().replace("\\", "/").strip("/")
-    if (
-        not value
-        or len(value) > 512
-        or not re.fullmatch(r"[A-Za-z0-9_./ ()-]+", value)
-        or ".." in Path(value).parts
-    ):
-        raise ValueError("drive_path must be a safe path relative to MyDrive")
-    return value
+    return drive_ops.normalize_drive_path(path, allow_root=False)
 
 
 @mcp.tool()
@@ -2330,77 +2343,294 @@ def export_session_notebook(
     }
 
 
+def _drive_operation(session_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    session = _validate_session_name(session_name)
+    result = _remote_shell(session, drive_ops.remote_script(payload), timeout=1800)
+    return _extract_json_marker(result.stdout, drive_ops.RESULT_MARKER)
+
+
+def _ensure_drive_workspace(
+    session_name: str, *, mount_if_needed: bool
+) -> dict[str, Any]:
+    if mount_if_needed:
+        return mount_google_drive(session_name)
+    workspace = _drive_operation(session_name, {"action": "bootstrap"})
+    return {"session_name": session_name, **workspace}
+
+
 @mcp.tool()
 def mount_google_drive(
-    session_name: SessionName, mount_path: RemotePath = "/content/drive"
+    session_name: SessionName,
+    mount_path: DriveMountPath = drive_ops.DRIVE_MOUNT_PATH,
 ) -> dict[str, Any]:
-    """Mount the user's Google Drive through the official Colab CLI."""
+    """Mount Drive and create the protected MyDrive/codex-colab workspace."""
     session = _validate_session_name(session_name)
-    remote_mount = _validate_remote_path(mount_path)
-    result = _colab(["drivemount", "-s", session, remote_mount], timeout=600)
-    return {"session_name": session, "mount_path": remote_mount, **_output(result)}
+    if mount_path != drive_ops.DRIVE_MOUNT_PATH:
+        raise ValueError(f"mount_path must be {drive_ops.DRIVE_MOUNT_PATH}")
+    already_mounted = True
+    try:
+        _remote_shell(
+            session,
+            f"test -d {shlex.quote(drive_ops.DRIVE_MOUNT_PATH + '/MyDrive')}",
+            timeout=60,
+        )
+        mount_result = subprocess.CompletedProcess([], 0, "", "")
+    except RuntimeError:
+        already_mounted = False
+        mount_result = _colab(
+            ["drivemount", "-s", session, drive_ops.DRIVE_MOUNT_PATH], timeout=600
+        )
+    workspace = _drive_operation(session, {"action": "bootstrap"})
+    return {
+        "session_name": session,
+        "mount_path": drive_ops.DRIVE_MOUNT_PATH,
+        "already_mounted": already_mounted,
+        "scope": "MyDrive/codex-colab only",
+        **workspace,
+        **_output(mount_result),
+    }
+
+
+@mcp.tool()
+def list_drive_files(
+    session_name: SessionName,
+    drive_path: DrivePath = ".",
+    recursive: Annotated[
+        bool, Field(description="List all descendants instead of direct children only.")
+    ] = False,
+    max_entries: Annotated[
+        int, Field(description="Maximum Drive entries to return.", ge=1, le=1000)
+    ] = 200,
+    mount_if_needed: Annotated[
+        bool,
+        Field(description="Mount Drive and create codex-colab when needed."),
+    ] = True,
+) -> dict[str, Any]:
+    """List files or folders only inside MyDrive/codex-colab."""
+    session = _validate_session_name(session_name)
+    _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
+    return {
+        "session_name": session,
+        **_drive_operation(
+            session,
+            {
+                "action": "list",
+                "drive_path": drive_ops.normalize_drive_path(drive_path),
+                "recursive": recursive,
+                "max_entries": max_entries,
+            },
+        ),
+    }
+
+
+@mcp.tool()
+def create_drive_folder(
+    session_name: SessionName,
+    drive_path: DrivePath,
+    mount_if_needed: Annotated[
+        bool,
+        Field(description="Mount Drive and create codex-colab when needed."),
+    ] = True,
+) -> dict[str, Any]:
+    """Create a folder only inside MyDrive/codex-colab."""
+    session = _validate_session_name(session_name)
+    relative = _drive_relative_path(drive_path)
+    _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
+    return {
+        "session_name": session,
+        **_drive_operation(
+            session, {"action": "mkdir", "drive_path": relative}
+        ),
+    }
+
+
+@mcp.tool()
+def save_to_drive(
+    session_name: SessionName,
+    remote_path: RemotePath,
+    drive_path: DrivePath,
+    overwrite: Annotated[
+        bool, Field(description="Replace an existing Drive file or folder.")
+    ] = False,
+    mount_if_needed: Annotated[
+        bool,
+        Field(description="Mount Drive and create codex-colab when needed."),
+    ] = True,
+) -> dict[str, Any]:
+    """Copy a Colab file or folder into MyDrive/codex-colab."""
+    session = _validate_session_name(session_name)
+    source = _validate_remote_path(remote_path)
+    relative = _drive_relative_path(drive_path)
+    _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
+    return {
+        "session_name": session,
+        **_drive_operation(
+            session,
+            {
+                "action": "save",
+                "remote_path": source,
+                "drive_path": relative,
+                "overwrite": overwrite,
+            },
+        ),
+    }
+
+
+@mcp.tool()
+def restore_from_drive(
+    session_name: SessionName,
+    drive_path: DrivePath,
+    remote_path: RemotePath,
+    overwrite: Annotated[
+        bool, Field(description="Replace an existing Colab file or folder.")
+    ] = False,
+    mount_if_needed: Annotated[
+        bool,
+        Field(description="Mount Drive and create codex-colab when needed."),
+    ] = True,
+) -> dict[str, Any]:
+    """Restore a file or folder from MyDrive/codex-colab into /content."""
+    session = _validate_session_name(session_name)
+    relative = _drive_relative_path(drive_path)
+    destination = _validate_remote_path(remote_path)
+    _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
+    return {
+        "session_name": session,
+        **_drive_operation(
+            session,
+            {
+                "action": "restore",
+                "drive_path": relative,
+                "remote_path": destination,
+                "overwrite": overwrite,
+            },
+        ),
+    }
+
+
+@mcp.tool()
+def move_drive_path(
+    session_name: SessionName,
+    source_drive_path: DrivePath,
+    destination_drive_path: DrivePath,
+    overwrite: Annotated[
+        bool, Field(description="Replace an existing Drive destination.")
+    ] = False,
+    mount_if_needed: Annotated[
+        bool,
+        Field(description="Mount Drive and create codex-colab when needed."),
+    ] = True,
+) -> dict[str, Any]:
+    """Move or rename an item within MyDrive/codex-colab."""
+    session = _validate_session_name(session_name)
+    source = _drive_relative_path(source_drive_path)
+    destination = _drive_relative_path(destination_drive_path)
+    _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
+    return {
+        "session_name": session,
+        **_drive_operation(
+            session,
+            {
+                "action": "move",
+                "source_drive_path": source,
+                "destination_drive_path": destination,
+                "overwrite": overwrite,
+            },
+        ),
+    }
+
+
+@mcp.tool()
+def delete_drive_path(
+    session_name: SessionName,
+    drive_path: DrivePath,
+    confirm: Annotated[
+        bool,
+        Field(description="Must be true to remove this Drive file or folder."),
+    ] = False,
+    mount_if_needed: Annotated[
+        bool,
+        Field(description="Mount Drive and create codex-colab when needed."),
+    ] = True,
+) -> dict[str, Any]:
+    """Delete one confirmed item within MyDrive/codex-colab; the root is protected."""
+    session = _validate_session_name(session_name)
+    relative = _drive_relative_path(drive_path)
+    if not confirm:
+        raise PermissionError("Set confirm=true to delete this Drive path")
+    _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
+    return {
+        "session_name": session,
+        **_drive_operation(
+            session,
+            {"action": "delete", "drive_path": relative, "confirm": True},
+        ),
+    }
 
 
 @mcp.tool()
 def save_notebook_to_drive(
     session_name: SessionName,
     local_path: LocalPath,
-    drive_path: Annotated[
-        str, Field(description="Destination path relative to Google Drive MyDrive.")
-    ],
+    drive_path: DrivePath,
     mount_if_needed: Annotated[
         bool,
-        Field(description="Mount Drive automatically if it is not already mounted."),
+        Field(description="Mount Drive and create codex-colab when needed."),
     ] = True,
 ) -> dict[str, Any]:
-    """Save an approved local notebook under Google Drive MyDrive."""
+    """Save an approved local notebook inside MyDrive/codex-colab."""
     session = _validate_session_name(session_name)
     source = _notebook_path(local_path, must_exist=True)
     relative = _drive_relative_path(drive_path)
     notebook_ops.load(source)
-    if mount_if_needed:
-        mount_google_drive(session)
+    _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
     temporary = f"/content/.codex-remote/notebooks/{secrets.token_hex(8)}.ipynb"
     upload = upload_file(session, str(source), temporary)
-    destination = f"/content/drive/MyDrive/{relative}"
-    result = _remote_shell(
-        session,
-        f"test -d /content/drive/MyDrive; mkdir -p {shlex.quote(destination.rsplit('/', 1)[0])}; cp -f {shlex.quote(temporary)} {shlex.quote(destination)}; rm -f {shlex.quote(temporary)}",
-        timeout=300,
-    )
+    try:
+        saved = _drive_operation(
+            session,
+            {
+                "action": "save",
+                "remote_path": temporary,
+                "drive_path": relative,
+                "overwrite": True,
+            },
+        )
+    finally:
+        _remote_shell(session, f"rm -f {shlex.quote(temporary)}", timeout=120)
     return {
         "session_name": session,
         "local_path": str(source),
-        "drive_path": f"MyDrive/{relative}",
+        "drive_path": saved["drive_path"],
+        "workspace_path": drive_ops.DRIVE_WORKSPACE_PATH,
         "upload": upload,
-        **_output(result),
     }
 
 
 @mcp.tool()
 def load_notebook_from_drive(
     session_name: SessionName,
-    drive_path: Annotated[
-        str, Field(description="Source path relative to Google Drive MyDrive.")
-    ],
+    drive_path: DrivePath,
     local_path: LocalPath,
     mount_if_needed: Annotated[
         bool,
-        Field(description="Mount Drive automatically if it is not already mounted."),
+        Field(description="Mount Drive and create codex-colab when needed."),
     ] = True,
 ) -> dict[str, Any]:
-    """Load a notebook from Google Drive MyDrive into an approved local path."""
+    """Load a notebook from MyDrive/codex-colab into an approved local path."""
     session = _validate_session_name(session_name)
     relative = _drive_relative_path(drive_path)
     destination = _notebook_path(local_path, must_exist=False)
-    if mount_if_needed:
-        mount_google_drive(session)
-    source = f"/content/drive/MyDrive/{relative}"
+    _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
     temporary = f"/content/.codex-remote/notebooks/{secrets.token_hex(8)}.ipynb"
-    _remote_shell(
+    _drive_operation(
         session,
-        f"test -f {shlex.quote(source)}; mkdir -p {shlex.quote(temporary.rsplit('/', 1)[0])}; cp {shlex.quote(source)} {shlex.quote(temporary)}",
-        timeout=300,
+        {
+            "action": "restore",
+            "drive_path": relative,
+            "remote_path": temporary,
+            "overwrite": True,
+        },
     )
     try:
         download = download_file(session, temporary, str(destination))
@@ -2409,7 +2639,7 @@ def load_notebook_from_drive(
         _remote_shell(session, f"rm -f {shlex.quote(temporary)}", timeout=120)
     return {
         "session_name": session,
-        "drive_path": f"MyDrive/{relative}",
+        "drive_path": drive_ops.display_drive_path(relative),
         "local_path": str(destination),
         "download": download,
         **notebook_ops.summary(notebook, False),

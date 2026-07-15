@@ -6,7 +6,7 @@
 4. If a job stalled, inspect `job_status` and `job_logs`. Distinguish stale heartbeat, application error, and lost runtime.
 5. If automatic recovery was pre-enabled, call `recovery_status`. The monitor may recreate the same requested runtime and restart only jobs that opted in with `recover_on_runtime_loss=true`, up to the configured attempt limit.
 6. For manual recovery, explain that reallocation can consume compute units and call `recover_session(confirm_reallocate=true)` only after approval. Commands must be safe to run again; duplicate external side effects remain possible.
-7. Restore outputs from a local notebook, resumable transfer, or Google Drive checkpoint. VM memory and uncheckpointed ephemeral files cannot be recovered.
+7. Restore outputs from a local notebook, resumable transfer, or a checkpoint saved under `MyDrive/codex-colab`. VM memory and uncheckpointed ephemeral files cannot be recovered.
 8. If a native Python, R, or Julia kernel fails after a restart, rerun `prepare_language`. If Colab still reports the kernel unavailable, stop the unusable session and report the image/capacity error; do not install a replacement runtime silently.
 9. Before retrying an expensive command, explain expected quota/compute impact.
 10. For a failed or cancelled managed transfer, inspect `transfer_status` and use `resume_transfer`; checksum verification protects the final result. Do not discard completed chunks unless the user no longer needs recovery.
