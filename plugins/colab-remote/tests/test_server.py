@@ -82,6 +82,42 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(metadata["owner_only_mode"])
         self.assertEqual(metadata["mode"], "600")
 
+    def test_insecure_wsl_token_permissions_are_repaired_automatically(self):
+        insecure = {
+            "oauth_token_present": True,
+            "owner_only_mode": False,
+            "mode": "644",
+            "symlink": False,
+        }
+        secure = {**insecure, "owner_only_mode": True, "mode": "600"}
+        with (
+            patch.object(
+                server, "_credential_metadata", side_effect=[insecure, secure]
+            ),
+            patch.object(server, "_linux_home", return_value="/home/test"),
+            patch.object(server, "_uses_wsl", return_value=True),
+            patch.object(server, "_wsl", return_value=completed()) as wsl,
+        ):
+            repaired = server._repair_credential_permissions()
+        self.assertTrue(repaired)
+        self.assertEqual(
+            wsl.call_args.args[0],
+            ["chmod", "600", "--", "/home/test/.config/colab-cli/token.json"],
+        )
+
+    def test_token_permission_repair_rejects_symlink(self):
+        metadata = {
+            "oauth_token_present": True,
+            "owner_only_mode": False,
+            "mode": "644",
+            "symlink": True,
+        }
+        with (
+            patch.object(server, "_credential_metadata", return_value=metadata),
+            self.assertRaisesRegex(PermissionError, "symlink"),
+        ):
+            server._repair_credential_permissions()
+
     def test_colab_serializes_session_operations(self):
         lock = MagicMock()
         lock.__enter__.return_value = None
@@ -121,6 +157,18 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(result.stdout, "ok")
         session_lock.assert_not_called()
 
+    def test_colab_blocks_commands_while_drive_mount_waits(self):
+        with (
+            patch.object(server, "_require_credentials"),
+            patch.object(
+                server, "_colab_path", return_value="/home/test/.local/bin/colab"
+            ),
+            patch.object(server, "_wsl", return_value=completed()),
+            patch.object(server, "_drive_mount_is_active", return_value=True),
+            self.assertRaisesRegex(RuntimeError, "complete_google_drive_mount"),
+        ):
+            server._colab(["exec", "-s", "test-session"], input_text="print(1)")
+
     def test_expected_tools_are_registered(self):
         names = {tool.name for tool in server.mcp._tool_manager.list_tools()}
         self.assertEqual(
@@ -129,6 +177,7 @@ class ServerTests(unittest.TestCase):
                 "add_notebook_cell",
                 "authentication_instructions",
                 "cancel_transfer",
+                "complete_google_drive_mount",
                 "create_notebook",
                 "create_drive_folder",
                 "create_session",
@@ -417,6 +466,11 @@ class ServerTests(unittest.TestCase):
             "retry_required": True,
         }
         with (
+            patch.object(
+                server,
+                "_cancel_drive_mount_worker",
+                return_value={"cancelled": True, "event": "cancelled"},
+            ) as cancel_drive,
             patch.object(server, "_ssh_state_path") as state_path,
             patch.object(server, "disable_ssh", return_value=failed_cleanup),
             patch.object(server, "_colab", side_effect=[completed(), completed()]),
@@ -426,7 +480,9 @@ class ServerTests(unittest.TestCase):
         ):
             state_path.return_value.exists.return_value = True
             result = server.stop_session("test-session", confirm=True)
+        cancel_drive.assert_called_once_with("test-session")
         delete_state.assert_called_once_with("test-session")
+        self.assertTrue(result["drive_mount_cleanup"]["cancelled"])
         self.assertTrue(result["ssh_cleanup"]["closed"])
         self.assertTrue(result["ssh_cleanup"]["terminated_by_session_stop"])
 
@@ -1064,26 +1120,28 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(observed["source"], source)
         self.assertEqual(result, remote_result)
 
-    def test_drive_authorization_status_uses_private_probe_output(self):
-        authorization = {
-            "authorized": False,
-            "authorization_url": "https://accounts.google.com/example",
-        }
-        stdout = "CODEX_DRIVE_AUTH=" + server.json.dumps(authorization)
-        lock = MagicMock()
-        lock.__enter__.return_value = None
-        with (
-            patch.object(server, "_require_credentials"),
-            patch.object(server, "_linux_home", return_value="/home/test"),
-            patch.object(server, "_wsl_path", return_value="/plugin/drive_auth_probe.py"),
-            patch.object(server, "_session_cli_lock", return_value=lock),
-            patch.object(server, "_wsl", return_value=completed(stdout=stdout)) as wsl,
-        ):
-            result = server._drive_authorization_status("test-session")
-        self.assertEqual(result, authorization)
-        command = wsl.call_args.args[0]
-        self.assertIn("/plugin/drive_auth_probe.py", command)
-        self.assertNotIn(authorization["authorization_url"], command)
+    def test_drive_mount_worker_starts_official_cli_in_persistent_host(self):
+        process = MagicMock(pid=1234)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.object(server, "STATE_ROOT", root),
+                patch.object(server, "DRIVE_MOUNTS_ROOT", root / "drive-mounts"),
+                patch.object(server, "_secure_state_root"),
+                patch.object(server, "_require_credentials"),
+                patch.object(server, "_colab_path", return_value="/home/test/colab"),
+                patch.object(server, "_linux_home", return_value="/home/test"),
+                patch.object(server, "_uses_wsl", return_value=False),
+                patch.object(server, "_wsl_path", side_effect=lambda path: str(path)),
+                patch.object(server, "_wsl", return_value=completed()),
+                patch.object(server.subprocess, "Popen", return_value=process) as popen,
+            ):
+                result = server._start_drive_mount_worker("test-session")
+        command = popen.call_args.args[0]
+        self.assertIn("drive_mount_worker.py", " ".join(command))
+        self.assertIn("/home/test/colab", command)
+        self.assertNotIn("accounts.google.com", " ".join(command))
+        self.assertEqual(result["launcher_pid"], 1234)
 
     def test_drive_delete_needs_confirmation_before_mounting(self):
         with (
@@ -1113,40 +1171,52 @@ class ServerTests(unittest.TestCase):
             "drive_path": "MyDrive/codex-colab",
         }
         with (
-            patch.object(server, "_colab") as colab,
+            patch.object(server, "_drive_mount_status", return_value={"event": "missing"}),
             patch.object(server, "_drive_operation", return_value=workspace),
+            patch.object(server, "_start_drive_mount_worker") as start,
         ):
             result = server.mount_google_drive("test-session")
-        colab.assert_not_called()
+        start.assert_not_called()
         self.assertTrue(result["already_mounted"])
         self.assertFalse(result["authorization_required"])
         self.assertEqual(result["scope"], "MyDrive/codex-colab only")
 
-    def test_drive_mount_opens_approval_without_starting_blocking_mount(self):
+    def test_drive_mount_keeps_worker_alive_and_opens_approval(self):
         authorization_url = "https://accounts.google.com/example"
         with (
             patch.object(
+                server,
+                "_drive_mount_status",
+                return_value={"event": "missing"},
+            ),
+            patch.object(
                 server, "_drive_operation", side_effect=RuntimeError("not mounted")
+            ),
+            patch.object(server, "_start_drive_mount_worker") as start,
+            patch.object(
+                server,
+                "_wait_for_drive_mount",
+                return_value={
+                    "event": "authorization_required",
+                    "worker_pid": 42,
+                },
             ),
             patch.object(
                 server,
-                "_drive_authorization_status",
-                return_value={
-                    "authorized": False,
-                    "authorization_url": authorization_url,
-                },
+                "_consume_drive_authorization_url",
+                return_value=authorization_url,
             ),
             patch.object(server.webbrowser, "open", return_value=True) as browser,
-            patch.object(server, "_colab") as colab,
         ):
             result = server.mount_google_drive("test-session")
+        start.assert_called_once_with("test-session")
         browser.assert_called_once_with(authorization_url, new=2)
-        colab.assert_not_called()
         self.assertTrue(result["authorization_required"])
         self.assertTrue(result["browser_opened"])
+        self.assertTrue(result["mount_in_progress"])
         self.assertNotIn("authorization_url", result)
 
-    def test_drive_mount_runs_only_after_authorization_is_ready(self):
+    def test_complete_drive_mount_resumes_same_worker_and_bootstraps(self):
         workspace = {
             "mounted": True,
             "workspace_exists": True,
@@ -1156,22 +1226,22 @@ class ServerTests(unittest.TestCase):
         with (
             patch.object(
                 server,
-                "_drive_operation",
-                side_effect=[RuntimeError("not mounted"), workspace],
+                "_drive_mount_status",
+                return_value={"event": "authorization_required", "worker_pid": 42},
             ),
+            patch.object(server, "_drive_mount_worker_alive", return_value=True),
+            patch.object(server, "_request_drive_mount_resume") as resume,
             patch.object(
                 server,
-                "_drive_authorization_status",
-                return_value={"authorized": True, "authorization_url": None},
+                "_wait_for_drive_mount",
+                return_value={"event": "completed", "exit_code": 0},
             ),
-            patch.object(server, "_colab", return_value=completed()) as colab,
+            patch.object(server, "_drive_operation", return_value=workspace),
         ):
-            result = server.mount_google_drive("test-session")
-        colab.assert_called_once_with(
-            ["drivemount", "-s", "test-session", "/content/drive"], timeout=180
-        )
-        self.assertFalse(result["already_mounted"])
+            result = server.complete_google_drive_mount("test-session", wait_seconds=30)
+        resume.assert_called_once_with("test-session")
         self.assertFalse(result["authorization_required"])
+        self.assertFalse(result["mount_in_progress"])
         self.assertEqual(result["workspace_path"], workspace["workspace_path"])
 
     def test_transfer_cancel_and_resume_preserve_state(self):

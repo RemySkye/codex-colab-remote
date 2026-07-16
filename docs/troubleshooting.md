@@ -10,6 +10,8 @@ Rerun the normal installer, then restart Codex or start a new task. The installe
 
 Rerun the OAuth command printed by `authentication_instructions`. Do not use `gcloud` ADC and do not paste the authorization code into Codex. On Windows the command runs inside WSL.
 
+The plugin automatically changes an existing Colab CLI token to owner-only mode when needed, so users should not normally need to run `chmod 600 ~/.config/colab-cli/token.json` manually.
+
 ## A requested GPU/TPU or High-RAM mode is unavailable
 
 Capacity and eligible combinations change by plan and region. Retry later or choose a smaller accelerator. Check `session_status` for the measured runtime and memory rather than assuming the request was honored.
@@ -32,7 +34,7 @@ Colab can reclaim VMs. Check `recovery_status`. Automatic recovery works only wh
 
 ## Google Drive is not mounted
 
-Call `mount_google_drive` and complete any authorization prompt shown by Google in Colab. Codex must never receive the authorization code or token. All plugin-managed files live under `MyDrive/codex-colab`; paths outside it are intentionally rejected.
+Call `mount_google_drive`. If it opens Google approval and returns `authorization_required=true`, approve the page and ask Codex to call `complete_google_drive_mount`. Do not repeatedly start new mount attempts: the completion tool resumes the original official CLI process and lets it propagate credentials into the VM. Codex must never receive an authorization code or token. All plugin-managed files live under `MyDrive/codex-colab`; paths outside it are intentionally rejected.
 
 For training performance, read active datasets and checkpoints from `/content` and save periodic checkpoints to Drive. Avoid workloads that repeatedly open thousands of small files directly on the mounted Drive filesystem.
 

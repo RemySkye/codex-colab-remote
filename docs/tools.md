@@ -39,13 +39,13 @@ Managed transfers support folders, compression, 1–8 parallel chunks, checksums
 - `create_notebook`, `read_notebook`
 - `add_notebook_cell`, `edit_notebook_cell`, `delete_notebook_cell`, `move_notebook_cell`
 - `run_notebook_cells`, `import_notebook`, `export_session_notebook`
-- `mount_google_drive`
+- `mount_google_drive`, `complete_google_drive_mount`
 - `list_drive_files`, `create_drive_folder`
 - `save_to_drive`, `restore_from_drive`
 - `move_drive_path`, `delete_drive_path`
 - `save_notebook_to_drive`, `load_notebook_from_drive`
 
-`mount_google_drive` creates `MyDrive/codex-colab` when it is missing. Every `drive_path` is relative to that folder; absolute paths, traversal, symlink escapes, and access to other mounted Drive folders are rejected. Deletion requires `confirm=true`. The save and restore tools copy complete files or folders directly between the Colab VM and Drive, without routing data through the local PC.
+`mount_google_drive` creates `MyDrive/codex-colab` when it is missing. If it returns `authorization_required=true`, approve Google in the opened browser and then call `complete_google_drive_mount`; the plugin keeps that same official CLI process alive so it can finish credential propagation. Every `drive_path` is relative to the protected folder; absolute paths, traversal, symlink escapes, and access to other mounted Drive folders are rejected. Deletion requires `confirm=true`. The save and restore tools copy complete files or folders directly between the Colab VM and Drive, without routing data through the local PC.
 
 Use fast `/content` storage for active training and periodically checkpoint important outputs into the returned Drive workspace. The plugin does not force an autosave policy: Codex may configure framework checkpoint code when the user requests it. Drive mounting may require the user to complete an interactive Google authorization step in Colab. Never provide that authorization material to Codex.
 

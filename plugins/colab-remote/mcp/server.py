@@ -19,6 +19,7 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -39,6 +40,7 @@ MONITORS_ROOT = STATE_ROOT / "monitors"
 LEASES_ROOT = STATE_ROOT / "leases"
 SSH_ROOT = STATE_ROOT / "ssh"
 TRANSFERS_ROOT = STATE_ROOT / "transfers"
+DRIVE_MOUNTS_ROOT = STATE_ROOT / "drive-mounts"
 SSH_SECRET_NAME = "NGROK_AUTHTOKEN"
 
 ACCELERATORS = {"cpu", "t4", "l4", "g4", "h100", "a100", "v5e-1", "v6e-1"}
@@ -560,9 +562,14 @@ def _colab_path() -> str:
 def _credential_metadata() -> dict[str, Any]:
     token = f"{_linux_home()}/.config/colab-cli/token.json"
     mode = None
+    symlink = False
     if _uses_wsl():
         exists = _wsl(["test", "-f", token], timeout=10, check=False).returncode == 0
         if exists:
+            symlink = (
+                _wsl(["test", "-L", token], timeout=10, check=False).returncode
+                == 0
+            )
             mode_result = _wsl(["stat", "-c", "%a", token], timeout=10, check=False)
             if mode_result.returncode == 0:
                 mode = mode_result.stdout.strip()
@@ -570,14 +577,42 @@ def _credential_metadata() -> dict[str, Any]:
         token_path = Path(token)
         exists = token_path.is_file()
         if exists:
+            symlink = token_path.is_symlink()
             mode = f"{stat.S_IMODE(token_path.stat().st_mode):o}"
     return {
         "oauth_token_present": exists,
         "owner_only_mode": mode == "600",
         "mode": mode,
+        "symlink": symlink,
         "gcloud_adc_used": False,
         "token_contents_read": False,
     }
+
+
+def _repair_credential_permissions() -> bool:
+    """Make an existing OAuth token owner-only without reading its contents."""
+    metadata = _credential_metadata()
+    if not metadata["oauth_token_present"] or metadata["owner_only_mode"]:
+        return False
+    if metadata.get("symlink"):
+        raise PermissionError("The Colab OAuth token path cannot be a symlink")
+    token = f"{_linux_home()}/.config/colab-cli/token.json"
+    if _uses_wsl():
+        result = _wsl(["chmod", "600", "--", token], timeout=10, check=False)
+        if result.returncode != 0:
+            raise PermissionError(
+                "Could not automatically restrict the Colab OAuth token inside WSL"
+            )
+    else:
+        try:
+            os.chmod(Path(token), 0o600)
+        except OSError as exc:
+            raise PermissionError(
+                "Could not automatically restrict the Colab OAuth token"
+            ) from exc
+    if not _credential_metadata()["owner_only_mode"]:
+        raise PermissionError("The Colab OAuth token is still not owner-only")
+    return True
 
 
 def _require_credentials() -> None:
@@ -588,11 +623,7 @@ def _require_credentials() -> None:
             "'colab --auth oauth2 sessions' command yourself in a trusted terminal. Never paste the code into Codex."
         )
     if not metadata["owner_only_mode"]:
-        location = "inside WSL" if _uses_wsl() else "on this computer"
-        raise RuntimeError(
-            "The Colab OAuth token file is not mode 600. Run "
-            f"'chmod 600 ~/.config/colab-cli/token.json' yourself {location} before continuing."
-        )
+        _repair_credential_permissions()
 
 
 def _colab(
@@ -647,6 +678,12 @@ def _colab(
             session = _validate_session_name(arguments[index + 1])
     if session is None or not serialize_session:
         return _wsl(command, input_text=input_text, timeout=timeout, check=check)
+    if arguments and arguments[0] not in {"sessions", "status", "stop"}:
+        if _drive_mount_is_active(session):
+            raise RuntimeError(
+                "Google Drive mounting is waiting on this session. Complete it with "
+                "complete_google_drive_mount before running another session command."
+            )
     with _session_cli_lock(session, max(30, min(timeout, 300))):
         return _wsl(command, input_text=input_text, timeout=timeout, check=check)
 
@@ -1669,8 +1706,13 @@ def credential_status(
         Field(description="Also make a harmless authenticated CLI request to Google."),
     ] = False,
 ) -> dict[str, Any]:
-    """Check OAuth presence and file mode without reading or returning token contents."""
+    """Check OAuth safely and automatically repair owner-only token permissions."""
     status = _credential_metadata()
+    repaired = False
+    if status["oauth_token_present"] and not status["owner_only_mode"]:
+        repaired = _repair_credential_permissions()
+        status = _credential_metadata()
+    status["permissions_repaired"] = repaired
     if validate_with_google and status["oauth_token_present"]:
         result = _colab(["sessions"], timeout=30, check=False)
         status["google_validation_succeeded"] = result.returncode == 0
@@ -1702,7 +1744,13 @@ def doctor() -> dict[str, Any]:
             checks["colab_cli_version"] = _redact(
                 (version.stdout or version.stderr).strip()
             )
-        checks["credentials"] = _credential_metadata()
+        credentials = _credential_metadata()
+        repaired = False
+        if credentials["oauth_token_present"] and not credentials["owner_only_mode"]:
+            repaired = _repair_credential_permissions()
+            credentials = _credential_metadata()
+        credentials["permissions_repaired"] = repaired
+        checks["credentials"] = credentials
     checks["local_file_access_enabled"] = bool(checks["config"]["allowed_local_roots"])
     checks["high_ram_supported_by_cli"] = False
     checks["high_ram_supported_by_compatibility_wrapper"] = True
@@ -2448,10 +2496,79 @@ def _drive_operation(session_name: str, payload: dict[str, Any]) -> dict[str, An
             )
 
 
-def _drive_authorization_status(session_name: str) -> dict[str, Any]:
-    """Check Drive authorization without starting a mount or blocking on a TTY."""
+_DRIVE_MOUNT_ACTIVE_EVENTS = {"starting", "authorization_required", "resuming"}
+_DRIVE_MOUNT_TERMINAL_EVENTS = {"completed", "error", "cancelled", "timed_out"}
+_DRIVE_MOUNT_STATE_FILES = {
+    "status.json",
+    "authorization.url",
+    "resume.request",
+    "cancel.request",
+}
+
+
+def _drive_mount_state_dir(session_name: str) -> Path:
     session = _validate_session_name(session_name)
+    _secure_state_root()
+    DRIVE_MOUNTS_ROOT.mkdir(parents=True, exist_ok=True)
+    root = DRIVE_MOUNTS_ROOT / session
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(DRIVE_MOUNTS_ROOT, 0o700)
+        os.chmod(root, 0o700)
+    except OSError:
+        pass
+    return root
+
+
+def _drive_mount_status(session_name: str) -> dict[str, Any]:
+    path = _drive_mount_state_dir(session_name) / "status.json"
+    if not path.is_file():
+        return {"event": "missing"}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"event": "missing"}
+    return value if isinstance(value, dict) else {"event": "missing"}
+
+
+def _drive_mount_worker_alive(status: dict[str, Any]) -> bool:
+    try:
+        pid = int(status.get("worker_pid", 0))
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    return _wsl(["kill", "-0", str(pid)], timeout=10, check=False).returncode == 0
+
+
+def _drive_mount_is_active(session_name: str) -> bool:
+    status = _drive_mount_status(session_name)
+    return (
+        status.get("event") in _DRIVE_MOUNT_ACTIVE_EVENTS
+        and _drive_mount_worker_alive(status)
+    )
+
+
+def _clear_drive_mount_state(session_name: str) -> Path:
+    root = _drive_mount_state_dir(session_name)
+    for name in _DRIVE_MOUNT_STATE_FILES:
+        (root / name).unlink(missing_ok=True)
+    return root
+
+
+def _start_drive_mount_worker(session_name: str) -> dict[str, Any]:
+    session = _validate_session_name(session_name)
+    existing = _drive_mount_status(session)
+    if (
+        existing.get("event") in _DRIVE_MOUNT_ACTIVE_EVENTS
+        and _drive_mount_worker_alive(existing)
+    ):
+        return existing
     _require_credentials()
+    colab = _colab_path()
+    if _wsl(["test", "-x", colab], timeout=10, check=False).returncode != 0:
+        raise RuntimeError("Google Colab CLI is not installed")
+    state_dir = _clear_drive_mount_state(session)
     python = f"{_linux_home()}/.local/share/uv/tools/google-colab-cli/bin/python"
     command = [
         "env",
@@ -2460,13 +2577,154 @@ def _drive_authorization_status(session_name: str) -> dict[str, Any]:
         "-u",
         "CLOUDSDK_CONFIG",
         python,
-        _wsl_path(PLUGIN_ROOT / "scripts" / "drive_auth_probe.py"),
+        _wsl_path(PLUGIN_ROOT / "scripts" / "drive_mount_worker.py"),
+        "--colab",
+        colab,
         "--session",
         session,
+        "--mount-path",
+        drive_ops.DRIVE_MOUNT_PATH,
+        "--state-dir",
+        _wsl_path(state_dir),
     ]
-    with _session_cli_lock(session, 90):
-        result = _wsl(command, timeout=90)
-    return _extract_json_marker(result.stdout, "CODEX_DRIVE_AUTH=")
+    host_command = (
+        ["wsl.exe", "-d", _distro(), "--", *command] if _uses_wsl() else command
+    )
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    process = subprocess.Popen(
+        host_command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=creationflags,
+        start_new_session=os.name != "nt",
+    )
+    return {
+        "event": "starting",
+        "launcher_pid": process.pid,
+        "started_at": int(time.time()),
+    }
+
+
+def _wait_for_drive_mount(
+    session_name: str, *, wait_seconds: int, include_authorization: bool
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0, wait_seconds)
+    while True:
+        status = _drive_mount_status(session_name)
+        event = status.get("event")
+        if event in _DRIVE_MOUNT_TERMINAL_EVENTS or (
+            include_authorization and event == "authorization_required"
+        ):
+            return status
+        if event in _DRIVE_MOUNT_ACTIVE_EVENTS and not _drive_mount_worker_alive(
+            status
+        ):
+            return {
+                "event": "error",
+                "message": "The Drive mount worker stopped unexpectedly.",
+            }
+        if time.monotonic() >= deadline:
+            return status
+        time.sleep(0.25)
+
+
+def _consume_drive_authorization_url(session_name: str) -> str | None:
+    path = _drive_mount_state_dir(session_name) / "authorization.url"
+    if not path.is_file():
+        return None
+    try:
+        if path.stat().st_size > 16_384:
+            raise RuntimeError("Google returned an invalid Drive authorization URL")
+        value = path.read_text(encoding="utf-8").strip()
+        parsed = urlparse(value)
+        if (
+            parsed.scheme != "https"
+            or (parsed.hostname or "").lower() != "accounts.google.com"
+        ):
+            raise RuntimeError("Google returned an unexpected Drive authorization URL")
+        return value
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _request_drive_mount_resume(session_name: str) -> None:
+    path = _drive_mount_state_dir(session_name) / "resume.request"
+    path.write_text("resume\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _cancel_drive_mount_worker(session_name: str) -> dict[str, Any]:
+    session = _validate_session_name(session_name)
+    status = _drive_mount_status(session)
+    if not (
+        status.get("event") in _DRIVE_MOUNT_ACTIVE_EVENTS
+        and _drive_mount_worker_alive(status)
+    ):
+        return {"cancelled": False, "event": status.get("event", "missing")}
+    request = _drive_mount_state_dir(session) / "cancel.request"
+    request.write_text("cancel\n", encoding="utf-8")
+    try:
+        os.chmod(request, 0o600)
+    except OSError:
+        pass
+    result = _wait_for_drive_mount(
+        session, wait_seconds=5, include_authorization=False
+    )
+    if result.get("event") in _DRIVE_MOUNT_ACTIVE_EVENTS:
+        pid = int(result.get("worker_pid", 0) or 0)
+        if pid > 0:
+            _wsl(["kill", "-TERM", str(pid)], timeout=10, check=False)
+    (_drive_mount_state_dir(session) / "authorization.url").unlink(missing_ok=True)
+    return {"cancelled": True, "event": result.get("event")}
+
+
+def _drive_mount_error(status: dict[str, Any]) -> RuntimeError:
+    event = str(status.get("event", "error"))
+    message = str(status.get("message") or "The official Colab Drive mount failed.")
+    return RuntimeError(f"{message} Mount state: {event}.")
+
+
+def _drive_mount_pending_result(
+    session_name: str, status: dict[str, Any]
+) -> dict[str, Any]:
+    session = _validate_session_name(session_name)
+    event = str(status.get("event", "starting"))
+    browser_opened = False
+    if event == "authorization_required":
+        authorization_url = _consume_drive_authorization_url(session)
+        if authorization_url:
+            try:
+                browser_opened = bool(webbrowser.open(authorization_url, new=2))
+            except webbrowser.Error:
+                browser_opened = False
+        next_step = (
+            "Approve Google Drive in the opened browser, then call "
+            "complete_google_drive_mount for this session. Do not copy or paste a code."
+        )
+    else:
+        next_step = "The official mount is starting; call mount_google_drive again shortly."
+    return {
+        "session_name": session,
+        "mount_path": drive_ops.DRIVE_MOUNT_PATH,
+        "already_mounted": False,
+        "mount_state": event,
+        "mount_in_progress": True,
+        "authorization_required": event == "authorization_required",
+        "browser_opened": browser_opened,
+        "scope": "MyDrive/codex-colab only",
+        "next_step": next_step,
+    }
 
 
 def _ensure_drive_workspace(
@@ -2483,53 +2741,116 @@ def mount_google_drive(
     session_name: SessionName,
     mount_path: DriveMountPath = drive_ops.DRIVE_MOUNT_PATH,
 ) -> dict[str, Any]:
-    """Mount Drive safely; first use may open Google's approval page."""
+    """Start a persistent official Drive mount; first use may require completion."""
     session = _validate_session_name(session_name)
     if mount_path != drive_ops.DRIVE_MOUNT_PATH:
         raise ValueError(f"mount_path must be {drive_ops.DRIVE_MOUNT_PATH}")
-    already_mounted = True
+    pending = _drive_mount_status(session)
+    if (
+        pending.get("event") in _DRIVE_MOUNT_ACTIVE_EVENTS
+        and _drive_mount_worker_alive(pending)
+    ):
+        pending = _wait_for_drive_mount(
+            session, wait_seconds=5, include_authorization=True
+        )
+        if pending.get("event") in {"error", "cancelled", "timed_out"}:
+            raise _drive_mount_error(pending)
+        return _drive_mount_pending_result(session, pending)
     try:
         workspace = _drive_operation(session, {"action": "bootstrap"})
-        mount_result = subprocess.CompletedProcess([], 0, "", "")
+        return {
+            "session_name": session,
+            "mount_path": drive_ops.DRIVE_MOUNT_PATH,
+            "already_mounted": True,
+            "mount_state": "completed",
+            "mount_in_progress": False,
+            "authorization_required": False,
+            "scope": "MyDrive/codex-colab only",
+            **workspace,
+        }
     except RuntimeError:
-        already_mounted = False
-        authorization = _drive_authorization_status(session)
-        if not authorization.get("authorized"):
-            authorization_url = authorization.get("authorization_url")
-            browser_opened = False
-            if isinstance(authorization_url, str) and authorization_url:
-                try:
-                    browser_opened = bool(webbrowser.open(authorization_url, new=2))
-                except webbrowser.Error:
-                    browser_opened = False
-            return {
-                "session_name": session,
-                "mount_path": drive_ops.DRIVE_MOUNT_PATH,
-                "already_mounted": False,
-                "authorization_required": True,
-                "browser_opened": browser_opened,
-                "scope": "MyDrive/codex-colab only",
-                "next_step": (
-                    "Approve Google Drive access in the browser, then call "
-                    "mount_google_drive again. Do not copy or paste any authorization code."
-                ),
-                "trusted_terminal_fallback": (
-                    f"colab --auth oauth2 drivemount -s {session} "
-                    f"{drive_ops.DRIVE_MOUNT_PATH}"
-                ),
-            }
-        mount_result = _colab(
-            ["drivemount", "-s", session, drive_ops.DRIVE_MOUNT_PATH], timeout=180
-        )
+        _start_drive_mount_worker(session)
+    status = _wait_for_drive_mount(
+        session, wait_seconds=45, include_authorization=True
+    )
+    if status.get("event") == "completed":
         workspace = _drive_operation(session, {"action": "bootstrap"})
+        return {
+            "session_name": session,
+            "mount_path": drive_ops.DRIVE_MOUNT_PATH,
+            "already_mounted": False,
+            "mount_state": "completed",
+            "mount_in_progress": False,
+            "authorization_required": False,
+            "scope": "MyDrive/codex-colab only",
+            **workspace,
+        }
+    if status.get("event") in {"error", "cancelled", "timed_out"}:
+        raise _drive_mount_error(status)
+    return _drive_mount_pending_result(session, status)
+
+
+@mcp.tool()
+def complete_google_drive_mount(
+    session_name: SessionName,
+    wait_seconds: Annotated[
+        int,
+        Field(
+            description="Seconds to wait for Google to finish mounting; call again if still running.",
+            ge=1,
+            le=120,
+        ),
+    ] = 60,
+) -> dict[str, Any]:
+    """Resume the same PTY mount after the user approves Google Drive."""
+    session = _validate_session_name(session_name)
+    status = _drive_mount_status(session)
+    event = status.get("event")
+    if event == "completed":
+        workspace = _drive_operation(session, {"action": "bootstrap"})
+        return {
+            "session_name": session,
+            "mount_path": drive_ops.DRIVE_MOUNT_PATH,
+            "mount_state": "completed",
+            "mount_in_progress": False,
+            "authorization_required": False,
+            "scope": "MyDrive/codex-colab only",
+            **workspace,
+        }
+    if event not in _DRIVE_MOUNT_ACTIVE_EVENTS or not _drive_mount_worker_alive(
+        status
+    ):
+        raise RuntimeError(
+            "No active Google Drive authorization is waiting. Call mount_google_drive first."
+        )
+    if event == "authorization_required":
+        _request_drive_mount_resume(session)
+    status = _wait_for_drive_mount(
+        session,
+        wait_seconds=max(1, min(wait_seconds, 120)),
+        include_authorization=False,
+    )
+    if status.get("event") == "completed":
+        workspace = _drive_operation(session, {"action": "bootstrap"})
+        return {
+            "session_name": session,
+            "mount_path": drive_ops.DRIVE_MOUNT_PATH,
+            "mount_state": "completed",
+            "mount_in_progress": False,
+            "authorization_required": False,
+            "scope": "MyDrive/codex-colab only",
+            **workspace,
+        }
+    if status.get("event") in {"error", "cancelled", "timed_out"}:
+        raise _drive_mount_error(status)
     return {
         "session_name": session,
         "mount_path": drive_ops.DRIVE_MOUNT_PATH,
-        "already_mounted": already_mounted,
+        "mount_state": status.get("event", "resuming"),
+        "mount_in_progress": True,
         "authorization_required": False,
         "scope": "MyDrive/codex-colab only",
-        **workspace,
-        **_output(mount_result),
+        "next_step": "The official mount is still running; call complete_google_drive_mount again.",
     }
 
 
@@ -3806,6 +4127,7 @@ def stop_session(
             "Stopping releases the VM and ephemeral data; re-run with confirm=true after user approval"
         )
     session = _validate_session_name(session_name)
+    drive_mount_cleanup = _cancel_drive_mount_worker(session)
     ssh_cleanup = (
         disable_ssh(session, confirm=True)
         if _ssh_state_path(session).exists()
@@ -3843,6 +4165,7 @@ def stop_session(
         "verified_absent": True,
         "stop": _output(result),
         "sessions_after": _output(verification),
+        "drive_mount_cleanup": drive_mount_cleanup,
         "ssh_cleanup": ssh_cleanup,
     }
 
