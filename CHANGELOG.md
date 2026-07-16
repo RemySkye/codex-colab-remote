@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.4
+
+- Replaced the incomplete Drive authorization preflight with a persistent PTY worker that keeps Google's original `drivemount` process alive through user approval and VM credential propagation.
+- Added `complete_google_drive_mount` so agents resume the exact pending mount instead of creating repeated authorization attempts.
+- Blocked conflicting session commands while Drive authorization is pending and cancel the worker during session shutdown.
+- Automatically repair an existing Colab CLI token to owner-only mode without reading its contents, eliminating the usual manual `chmod 600` repair.
+- Added native POSIX PTY regression coverage plus expanded Drive, credential-permission, protocol, and cleanup tests.
+
 ## 0.6.3
 
 - Fixed Google Drive mounting so first-use authorization returns immediately, opens Google's approval page, and never exposes authorization URLs, codes, or tokens to the agent.
