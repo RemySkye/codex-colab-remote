@@ -5,10 +5,11 @@
       "args": [
         "run",
         "--project",
-        "${__dirname}",
+        ".",
         "python",
-        "${__dirname}/mcp/server.py"
-      ]
+        "./mcp/server.py"
+      ],
+      "cwd": "."
     }
   }
 }

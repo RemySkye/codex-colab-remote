@@ -36,13 +36,48 @@ if package_version != plugin_version:
     fail("pyproject and plugin manifest versions must match")
 if manifest.get("mcpServers") != "./.mcp.json":
     fail("plugin must reference .mcp.json")
+for field in ("skills", "mcpServers"):
+    reference = manifest.get(field)
+    if not isinstance(reference, str) or not reference.startswith("./"):
+        fail(f"plugin {field} reference must be plugin-relative")
+    target = (ROOT / reference).resolve()
+    try:
+        target.relative_to(ROOT.resolve())
+    except ValueError:
+        fail(f"plugin {field} reference escapes the plugin root")
+    if not target.exists():
+        fail(f"plugin {field} reference does not exist")
 
 mcp_config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
 if set(mcp_config.get("mcpServers", {})) != {"colab-remote"}:
     fail(".mcp.json must expose only colab-remote")
 launcher = mcp_config["mcpServers"]["colab-remote"]
-if launcher.get("command") != "uv" or "--project" not in launcher.get("args", []):
-    fail(".mcp.json must use the portable uv launcher")
+expected_launcher = {
+    "command": "uv",
+    "args": ["run", "--project", ".", "python", "./mcp/server.py"],
+    "cwd": ".",
+}
+if launcher != expected_launcher:
+    fail(".mcp.json must use the exact plugin-relative uv launcher")
+serialized_launcher = json.dumps(launcher)
+if re.search(r"\$\{[^}]+\}", serialized_launcher):
+    fail(".mcp.json contains an unresolved placeholder")
+launcher_cwd = (ROOT / launcher["cwd"]).resolve()
+try:
+    launcher_cwd.relative_to(ROOT.resolve())
+except ValueError:
+    fail(".mcp.json working directory escapes the plugin root")
+if not launcher_cwd.is_dir():
+    fail(".mcp.json working directory does not exist")
+for argument in launcher["args"]:
+    if isinstance(argument, str) and argument.startswith("./"):
+        target = (launcher_cwd / argument).resolve()
+        try:
+            target.relative_to(ROOT.resolve())
+        except ValueError:
+            fail(f".mcp.json argument escapes the plugin root: {argument}")
+        if not target.exists():
+            fail(f".mcp.json relative argument does not exist: {argument}")
 
 required = [
     REPOSITORY_ROOT / "install.ps1",
@@ -80,6 +115,22 @@ if marketplace.get("name") != "colab-remote" or not entry:
     fail("repository marketplace must expose colab-remote")
 if entry.get("source", {}).get("path") != "./plugins/colab-remote":
     fail("marketplace path must be ./plugins/colab-remote")
+marketplace_plugin = (
+    REPOSITORY_ROOT / entry["source"]["path"]
+).resolve()
+try:
+    marketplace_plugin.relative_to(REPOSITORY_ROOT.resolve())
+except ValueError:
+    fail("marketplace plugin source escapes the repository")
+if marketplace_plugin != ROOT.resolve():
+    fail("marketplace plugin source does not resolve to this plugin")
+for label, payload in (
+    ("plugin manifest", manifest),
+    ("MCP configuration", mcp_config),
+    ("marketplace", marketplace),
+):
+    if re.search(r"\$\{[^}]+\}", json.dumps(payload)):
+        fail(f"{label} contains an unresolved placeholder")
 
 banned = {
     "C:\\Users\\Administrator": "hardcoded Windows user",
