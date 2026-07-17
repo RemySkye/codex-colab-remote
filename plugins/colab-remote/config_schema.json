@@ -1,0 +1,107 @@
+{
+  "note": "Internal schema used to generate comments in the owner-only config.jsonc file.",
+  "settings": {
+    "distro": {
+      "description": "WSL distribution used on Windows; ignored on Linux and macOS.",
+      "type": "string",
+      "default": "Ubuntu",
+      "allowed": "A configured WSL distribution name"
+    },
+    "default_accelerator": {
+      "description": "Default Colab hardware when create_session does not specify one.",
+      "type": "string",
+      "default": "cpu",
+      "allowed": ["cpu", "t4", "l4", "g4", "h100", "a100", "v5e-1", "v6e-1"]
+    },
+    "default_language": {
+      "description": "Default native Colab kernel language.",
+      "type": "string",
+      "default": "python",
+      "allowed": ["python", "r", "julia"]
+    },
+    "default_runtime_version": {
+      "description": "Default Colab runtime image label. Latest is recommended.",
+      "type": "string",
+      "default": "latest",
+      "allowed": "latest or YYYY.MM"
+    },
+    "default_high_ram": {
+      "description": "Whether new sessions request High-RAM by default. L4, G4, H100, v5e-1, and v6e-1 override false because Colab only offers them with High-RAM.",
+      "type": "boolean",
+      "default": false,
+      "allowed": [false, true]
+    },
+    "default_timeout_seconds": {
+      "description": "Default timeout for supported MCP operations.",
+      "type": "integer",
+      "default": 3600,
+      "allowed": "30 through 86400"
+    },
+    "compute_warning_minutes": {
+      "description": "Elapsed session time at which Codex reports a compute-use warning.",
+      "type": "integer",
+      "default": 60,
+      "allowed": "5 through 1440"
+    },
+    "default_max_lifetime_minutes": {
+      "description": "Default hard session lifetime; 0 disables the plugin timer.",
+      "type": "integer",
+      "default": 0,
+      "allowed": "0 through 1440"
+    },
+    "notification_mode": {
+      "description": "Desktop popup policy. Silent notification history is always retained.",
+      "type": "string",
+      "default": "off",
+      "allowed": ["off", "failures_only", "all"]
+    },
+    "max_concurrent_sessions": {
+      "description": "Maximum active Colab assignments allowed before create_session is blocked.",
+      "type": "integer",
+      "default": 8,
+      "allowed": "1 through 64"
+    },
+    "transfer_compression": {
+      "description": "Default compression for managed uploads and downloads; folders are always archived.",
+      "type": "boolean",
+      "default": false,
+      "allowed": [false, true]
+    },
+    "transfer_parallelism": {
+      "description": "Default number of simultaneous chunks for managed transfers.",
+      "type": "integer",
+      "default": 4,
+      "allowed": "1 through 8"
+    },
+    "retry_attempts": {
+      "description": "Total attempts for retry-safe read-only CLI operations and managed transfer chunks. Mutating operations are never automatically repeated.",
+      "type": "integer",
+      "default": 3,
+      "allowed": "1 through 10"
+    },
+    "default_drive_checkpoint_folder": {
+      "description": "Default folder inside MyDrive/codex-colab when a Drive save omits drive_path.",
+      "type": "string",
+      "default": "checkpoints",
+      "allowed": "A relative folder path inside codex-colab; no absolute path, empty component, '.', or '..'"
+    },
+    "require_cost_acknowledgement": {
+      "description": "Safety control requiring user approval before allocation. Always forced to true.",
+      "type": "boolean",
+      "default": true,
+      "allowed": [true]
+    },
+    "allowed_local_roots": {
+      "description": "Exact existing local folders the plugin may access for files and notebooks.",
+      "type": "array of absolute paths",
+      "default": [],
+      "allowed": "Existing directories approved by the user"
+    },
+    "ssh_tunnel_enabled": {
+      "description": "Whether the optional user-approved public ngrok SSH workflow is available.",
+      "type": "boolean",
+      "default": false,
+      "allowed": [false, true]
+    }
+  }
+}

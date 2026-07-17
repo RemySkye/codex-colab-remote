@@ -16,7 +16,7 @@ Codex may defer MCP tool definitions until a relevant tool is requested. Do not 
 3. Call `get_config`. Confirm the requested accelerator, language, High-RAM setting, runtime version, maximum lifetime, and local-file roots. Prefer `runtime_version="latest"` unless the user needs a reproducible older image. A maximum lifetime of zero disables the plugin timer.
 4. Explain the quota/compute warning and get explicit approval. Then call `create_session` with `acknowledge_cost=true`, `high_ram=true` or `false`, and the confirmed settings.
 
-Use only these accelerator values: `cpu`, `t4`, `l4`, `g4`, `h100`, `a100`, `v5e-1`, and `v6e-1`. Use only `python`, `r`, or `julia` for language. Availability depends on the user's plan and capacity. Google may reject or ignore unsupported High-RAM combinations, so report measured memory from the result.
+Use only these accelerator values: `cpu`, `t4`, `l4`, `g4`, `h100`, `a100`, `v5e-1`, and `v6e-1`. Use only `python`, `r`, or `julia` for language. Availability depends on the user's plan and capacity. L4, G4, H100, v5e-1, and v6e-1 automatically force High-RAM even when `high_ram=false`; CPU, T4, and A100 preserve the requested High-RAM setting. Report measured memory from the result.
 
 ## Execute work
 
@@ -24,7 +24,7 @@ Use only these accelerator values: `cpu`, `t4`, `l4`, `g4`, `h100`, `a100`, `v5e
 - Python, R, and Julia use Colab's native kernels (`python3`, `ir`, and `julia`). Python is the default. `create_session` verifies the selected kernel; call `prepare_language` only to switch or recheck a kernel. It never installs or downloads a language.
 - Use `execute_file` for an approved local script. Local access is off by default and restricted to `allowed_local_roots`.
 - Use `terminal_exec` for arbitrary Linux shell commands. It is automatic over the official Colab CLI and requires no ngrok token, public tunnel, or SSH setup. Use tmux or `start_job` for persistent commands.
-- Use `upload_file` and `download_file` for single files up to 64 MiB. For larger files or folders, use `start_upload` or `start_download`, save the returned `transfer_id`, then call `transfer_status`. Managed transfers support compression, 1-8 parallel chunks, resume, and checksum verification. Use `cancel_transfer(confirm=true)` for cooperative cancellation and `resume_transfer` to continue completed chunks. Never broaden approved roots without explicit confirmation through `set_config`.
+- Use `upload_file` and `download_file` for single files up to 64 MiB. For larger files or folders, use `start_upload` or `start_download`, save the returned `transfer_id`, then call `transfer_status`. Omitted compression and parallelism values use the configured defaults. Managed transfers support bounded chunk retries, resume, and checksum verification. Use `cancel_transfer(confirm=true)` for cooperative cancellation and `resume_transfer` to continue completed chunks. Never broaden approved roots without explicit confirmation through `set_config`.
 - Use `create_notebook`, `read_notebook`, and the cell tools to create and edit local nbformat 4 notebooks. `run_notebook_cells` runs selected cells on the session and saves outputs locally. Use `import_notebook` for a validated local copy and `export_session_notebook` to export session history.
 - Use `mount_google_drive` to create the dedicated `MyDrive/codex-colab` workspace. On first use it may return `authorization_required=true` while keeping Google's official mount alive in a PTY. Ask the user only to approve the page that opened, then call `complete_google_drive_mount`; do not call `mount_google_drive` repeatedly and never ask for or handle an authorization code. Treat the returned `workspace_path` as the only Drive path agents may use. Never inspect, list, read, write, move, or delete its parent through `terminal_exec`, `execute_code`, a job, SSH, or notebook code.
 - Use `list_drive_files` and `create_drive_folder` to organize the workspace. Use `save_to_drive` and `restore_from_drive` for general files or folders, and the notebook-specific save/load tools for validated notebooks. Use `move_drive_path` only within the workspace. Call `delete_drive_path` only for a specific user-requested item and set `confirm=true`; the workspace root cannot be deleted.
@@ -48,6 +48,8 @@ Do not disable host-key checking, expose a password, grant sudo/root, reveal a p
 ## Long jobs
 
 Use `start_job` for long commands. It provides tmux persistence, logs, heartbeat, exit status, optional JSON progress, and a detached local completion watcher. Programs may write JSON to the path in `CODEX_PROGRESS_FILE`.
+
+Desktop popups use `notification_mode`: `off`, `failures_only`, or `all`. It defaults to `off`. Do not change the mode or set `notify_on_completion=true` unless the user explicitly asks for popups. Use `notification_history` for silent completion records.
 
 Use `stop_session_on_finish=true` only when the user wants the VM released when that job ends. Otherwise keep the session available for follow-up work. Use `set_session_lifetime` for a hard upper bound that survives MCP restarts.
 

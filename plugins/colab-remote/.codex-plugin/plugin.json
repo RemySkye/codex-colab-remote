@@ -1,6 +1,6 @@
 {
   "name": "colab-remote",
-  "version": "0.6.5+codex.20260717065601",
+  "version": "0.6.7+codex.20260717082623",
   "description": "Operate Colab compute, notebooks, resumable files, recoverable jobs, and optional SSH.",
   "author": {
     "name": "RemySkye",
@@ -35,7 +35,7 @@
       "Resumable parallel file and folder transfers",
       "Notebook editing and sandboxed Google Drive storage",
       "Session lifetime and automatic recovery",
-      "Progress and completion notifications",
+      "Progress, silent history, and opt-in notifications",
       "Optional key-only SSH terminal"
     ],
     "defaultPrompt": "Use $operate-colab-remote to run this safely on my authorized Google Colab runtime."

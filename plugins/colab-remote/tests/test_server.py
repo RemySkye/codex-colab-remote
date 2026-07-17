@@ -157,6 +157,45 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(result.stdout, "ok")
         session_lock.assert_not_called()
 
+    def test_colab_retries_only_retry_safe_commands(self):
+        config = {**server.DEFAULT_CONFIG, "retry_attempts": 2}
+        with (
+            patch.object(server, "_require_credentials"),
+            patch.object(
+                server, "_colab_path", return_value="/home/test/.local/bin/colab"
+            ),
+            patch.object(server, "_load_config", return_value=config),
+            patch.object(
+                server,
+                "_wsl",
+                side_effect=[
+                    completed(),
+                    RuntimeError("temporary"),
+                    completed(stdout="ready"),
+                ],
+            ) as wsl,
+            patch.object(server.time, "sleep"),
+        ):
+            result = server._colab(["sessions"])
+        self.assertEqual(result.stdout, "ready")
+        self.assertEqual(wsl.call_count, 3)
+
+        with (
+            patch.object(server, "_require_credentials"),
+            patch.object(
+                server, "_colab_path", return_value="/home/test/.local/bin/colab"
+            ),
+            patch.object(server, "_load_config", return_value=config),
+            patch.object(
+                server,
+                "_wsl",
+                side_effect=[completed(), RuntimeError("allocation failed")],
+            ) as wsl,
+            self.assertRaisesRegex(RuntimeError, "allocation failed"),
+        ):
+            server._colab(["new", "-s", "test-session"])
+        self.assertEqual(wsl.call_count, 2)
+
     def test_colab_blocks_commands_while_drive_mount_waits(self):
         with (
             patch.object(server, "_require_credentials"),
@@ -374,6 +413,66 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(result["default_high_ram"])
         self.assertNotIn("prefer_high_ram", result)
         self.assertNotIn("ssh_secret_name", result)
+
+    def test_config_migrates_to_commented_jsonc(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            state.mkdir()
+            legacy_path = state / "config.json"
+            config_path = state / "config.jsonc"
+            legacy_path.write_text(
+                '{"notifications_enabled": true}', encoding="utf-8"
+            )
+            with (
+                patch.object(server, "STATE_ROOT", state),
+                patch.object(server, "CONFIG_PATH", config_path),
+                patch.object(server, "_secure_state_root"),
+            ):
+                result = server.get_config()
+            stored_text = config_path.read_text(encoding="utf-8")
+            stored = server.config_io.loads(stored_text)
+        self.assertEqual(result["notification_mode"], "all")
+        self.assertNotIn("notifications_enabled", stored)
+        self.assertFalse(legacy_path.exists())
+        self.assertIn("// Desktop popup policy", stored_text)
+        self.assertIn("// Allowed: \"off\", \"failures_only\", \"all\".", stored_text)
+        self.assertNotIn("_documentation", stored)
+
+    def test_config_updates_new_operational_defaults(self):
+        rendered = ""
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(server, "STATE_ROOT", Path(temporary) / "state"),
+            patch.object(
+                server, "CONFIG_PATH", Path(temporary) / "state" / "config.jsonc"
+            ),
+            patch.object(
+                server,
+                "_secure_state_root",
+                lambda: (Path(temporary) / "state").mkdir(parents=True, exist_ok=True),
+            ),
+        ):
+            result = server.set_config(
+                notification_mode="failures_only",
+                max_concurrent_sessions=8,
+                transfer_compression=True,
+                transfer_parallelism=6,
+                retry_attempts=5,
+                default_drive_checkpoint_folder="training/checkpoints",
+            )
+            rendered = (Path(temporary) / "state" / "config.jsonc").read_text(
+                encoding="utf-8"
+            )
+        self.assertEqual(result["notification_mode"], "failures_only")
+        self.assertEqual(result["max_concurrent_sessions"], 8)
+        self.assertTrue(result["transfer_compression"])
+        self.assertEqual(result["transfer_parallelism"], 6)
+        self.assertEqual(result["retry_attempts"], 5)
+        self.assertEqual(
+            result["default_drive_checkpoint_folder"], "training/checkpoints"
+        )
+        self.assertIn("// Total attempts for retry-safe", rendered)
+        self.assertEqual(server.config_io.loads(rendered)["retry_attempts"], 5)
 
     def test_config_requires_confirmation_to_enable_ssh(self):
         with (
@@ -625,6 +724,19 @@ class ServerTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 server.create_session("test-session", accelerator="A100")
 
+    def test_concurrent_session_limit_counts_server_assignments(self):
+        listing = completed(
+            "[first] endpoint-1 | Hardware: CPU | Variant: DEFAULT\n"
+            "[?] endpoint-2 | Hardware: T4 | Variant: GPU\n"
+        )
+        config = {**server.DEFAULT_CONFIG, "max_concurrent_sessions": 2}
+        self.assertEqual(server._active_session_count(listing.stdout), 2)
+        with (
+            patch.object(server, "_colab", return_value=listing),
+            self.assertRaisesRegex(RuntimeError, "2/2"),
+        ):
+            server._enforce_session_limit(config)
+
     def test_cost_acknowledgement_cannot_be_disabled_in_config_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -643,6 +755,11 @@ class ServerTests(unittest.TestCase):
         with (
             patch.object(
                 server, "_load_config", return_value=dict(server.DEFAULT_CONFIG)
+            ),
+            patch.object(
+                server,
+                "_enforce_session_limit",
+                return_value={"active_sessions": 0, "max_concurrent_sessions": 8},
             ),
             patch.object(server, "_colab", return_value=completed("ok")) as colab,
             patch.object(
@@ -671,12 +788,82 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(result["high_ram_requested"])
         self.assertEqual(colab.call_args_list[0].kwargs["machine_shape"], "hm")
 
+    def test_high_ram_only_accelerators_override_false(self):
+        self.assertEqual(
+            server.HIGH_RAM_REQUIRED_ACCELERATORS,
+            {"l4", "g4", "h100", "v5e-1", "v6e-1"},
+        )
+        self.assertEqual(
+            server.ACCELERATORS - server.HIGH_RAM_REQUIRED_ACCELERATORS,
+            {"cpu", "t4", "a100"},
+        )
+        for accelerator in sorted(server.HIGH_RAM_REQUIRED_ACCELERATORS):
+            with self.subTest(accelerator=accelerator):
+                with (
+                    patch.object(
+                        server,
+                        "_load_config",
+                        return_value=dict(server.DEFAULT_CONFIG),
+                    ),
+                    patch.object(
+                        server,
+                        "_enforce_session_limit",
+                        return_value={
+                            "active_sessions": 0,
+                            "max_concurrent_sessions": 8,
+                        },
+                    ),
+                    patch.object(
+                        server, "_colab", return_value=completed("ok")
+                    ) as colab,
+                    patch.object(
+                        server,
+                        "_initialize_native_language",
+                        return_value={
+                            "language": "python",
+                            "kernel": "python3",
+                            "native": True,
+                        },
+                    ),
+                    patch.object(
+                        server,
+                        "_memory_status",
+                        return_value={"bytes": 55, "gib": 51.0},
+                    ),
+                    patch.object(server, "_record_session"),
+                    patch.object(
+                        server,
+                        "_session_compute_metadata",
+                        return_value={"tracked": True},
+                    ),
+                ):
+                    result = server.create_session(
+                        f"test-{accelerator}",
+                        accelerator=accelerator,
+                        high_ram=False,
+                        acknowledge_cost=True,
+                    )
+
+                self.assertTrue(result["high_ram_requested"])
+                self.assertTrue(result["high_ram_forced_by_accelerator"])
+                self.assertEqual(
+                    colab.call_args_list[0].kwargs["machine_shape"], "hm"
+                )
+                self.assertTrue(
+                    any("enabled automatically" in item for item in result["warnings"])
+                )
+
     def test_create_can_disable_high_ram_and_prefer_latest_runtime(self):
         with (
             patch.object(
                 server,
                 "_load_config",
                 return_value={**server.DEFAULT_CONFIG, "default_high_ram": True},
+            ),
+            patch.object(
+                server,
+                "_enforce_session_limit",
+                return_value={"active_sessions": 0, "max_concurrent_sessions": 8},
             ),
             patch.object(server, "_colab", return_value=completed("ok")) as colab,
             patch.object(
@@ -704,6 +891,7 @@ class ServerTests(unittest.TestCase):
                 acknowledge_cost=True,
             )
         self.assertFalse(result["high_ram_requested"])
+        self.assertFalse(result["high_ram_forced_by_accelerator"])
         self.assertEqual(result["runtime_version"], "latest")
         self.assertIsNone(colab.call_args_list[0].kwargs["machine_shape"])
         self.assertIsNone(colab.call_args_list[0].kwargs["runtime_version"])
@@ -748,6 +936,11 @@ class ServerTests(unittest.TestCase):
         with (
             patch.object(
                 server, "_load_config", return_value=dict(server.DEFAULT_CONFIG)
+            ),
+            patch.object(
+                server,
+                "_enforce_session_limit",
+                return_value={"active_sessions": 0, "max_concurrent_sessions": 8},
             ),
             patch.object(
                 server,
@@ -825,6 +1018,11 @@ class ServerTests(unittest.TestCase):
         with (
             patch.object(
                 server, "_load_config", return_value=dict(server.DEFAULT_CONFIG)
+            ),
+            patch.object(
+                server,
+                "_enforce_session_limit",
+                return_value={"active_sessions": 0, "max_concurrent_sessions": 8},
             ),
             patch.object(
                 server,
@@ -914,6 +1112,85 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(downloaded["transfer_mode"], "chunked")
             self.assertEqual(destination.read_bytes(), source.read_bytes())
 
+    def test_managed_transfer_uses_configured_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.bin"
+            source.write_bytes(b"data")
+            config = {
+                **server.DEFAULT_CONFIG,
+                "allowed_local_roots": [str(root)],
+                "transfer_compression": True,
+                "transfer_parallelism": 7,
+                "retry_attempts": 5,
+            }
+            with (
+                patch.object(server, "_load_config", return_value=config),
+                patch.object(
+                    server.managed_transfer,
+                    "spawn",
+                    side_effect=lambda _api, state: state,
+                ),
+            ):
+                upload = server.start_upload(
+                    "test-session", str(source), "/content/source.bin"
+                )
+                download = server.start_download(
+                    "test-session", "/content/result.bin", str(root / "result.bin")
+                )
+        for state in (upload, download):
+            self.assertTrue(state["compress"])
+            self.assertEqual(state["parallelism"], 7)
+            self.assertEqual(state["retry_attempts"], 5)
+
+    def test_transfer_chunk_retries_are_bounded(self):
+        calls = []
+
+        def flaky(name):
+            calls.append(name)
+            if len(calls) < 3:
+                raise RuntimeError("temporary")
+
+        state = {
+            "transfer_id": "a" * 24,
+            "parallelism": 1,
+            "retry_attempts": 3,
+        }
+        with (
+            patch.object(server.managed_transfer, "progress"),
+            patch.object(server.managed_transfer, "cancelled", return_value=False),
+            patch.object(server.managed_transfer.time, "sleep"),
+        ):
+            server.managed_transfer.parallel_parts(
+                server, state, [("part-000000", 4)], flaky
+            )
+        self.assertEqual(calls, ["part-000000"] * 3)
+
+    def test_default_drive_checkpoint_folder_is_used_when_path_is_omitted(self):
+        config = {
+            **server.DEFAULT_CONFIG,
+            "default_drive_checkpoint_folder": "training/checkpoints",
+        }
+        with (
+            patch.object(server, "_load_config", return_value=config),
+            patch.object(server, "_ensure_drive_workspace"),
+            patch.object(
+                server,
+                "_drive_operation",
+                return_value={
+                    "drive_path": "MyDrive/codex-colab/training/checkpoints/model.bin"
+                },
+            ) as operation,
+        ):
+            result = server.save_to_drive(
+                "test-session", "/content/model.bin"
+            )
+        self.assertEqual(
+            operation.call_args.args[1]["drive_path"],
+            "training/checkpoints/model.bin",
+        )
+        self.assertIn("training/checkpoints/model.bin", result["drive_path"])
+
     def test_job_wrapper_tracks_progress_and_real_process(self):
         captured = {}
 
@@ -930,6 +1207,15 @@ class ServerTests(unittest.TestCase):
         self.assertIn("heartbeat", captured["script"])
         self.assertIn("exit_code", captured["script"])
         self.assertNotIn("ngrok", captured["script"].lower())
+
+    def test_job_completion_monitor_is_opt_in(self):
+        with (
+            patch.object(server, "_remote_shell", return_value=completed()),
+            patch.object(server, "_start_monitor") as monitor,
+        ):
+            result = server.start_job("test-session", "train", "python train.py")
+        self.assertNotIn("monitor", result)
+        monitor.assert_not_called()
 
     def test_job_can_opt_into_recovery_and_automatic_session_stop(self):
         with (
@@ -951,7 +1237,7 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(result["stop_session_on_finish"])
         self.assertTrue(result["recover_on_runtime_loss"])
         remember.assert_called_once()
-        monitor.assert_called_once_with("test-session", "train", 30, True, True)
+        monitor.assert_called_once_with("test-session", "train", 30, False, True, True)
 
     def test_expired_lifetime_stops_session(self):
         record = {"expires_at": 99}
@@ -1406,12 +1692,101 @@ class ServerTests(unittest.TestCase):
             patch.object(
                 server,
                 "_load_config",
-                return_value={**server.DEFAULT_CONFIG, "notifications_enabled": False},
+                return_value={**server.DEFAULT_CONFIG, "notification_mode": "off"},
             ),
         ):
             server._write_notification("Done", "safe")
             rows = server.notification_history()
         self.assertEqual(rows[0]["message"], "safe")
+
+    def test_desktop_notifications_are_disabled_by_default(self):
+        self.assertEqual(server.DEFAULT_CONFIG["notification_mode"], "off")
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(server, "STATE_ROOT", Path(temporary) / "state"),
+            patch.object(
+                server,
+                "NOTIFICATIONS_PATH",
+                Path(temporary) / "state" / "notifications.jsonl",
+            ),
+            patch.object(server, "_load_config", return_value=server.DEFAULT_CONFIG),
+            patch.object(server, "_run") as run,
+        ):
+            result = server._write_notification("Title", "Body")
+        self.assertFalse(result["desktop_delivered"])
+        run.assert_not_called()
+
+    def test_failures_only_notification_mode_suppresses_success(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(server, "STATE_ROOT", Path(temporary) / "state"),
+            patch.object(
+                server,
+                "NOTIFICATIONS_PATH",
+                Path(temporary) / "state" / "notifications.jsonl",
+            ),
+            patch.object(
+                server,
+                "_load_config",
+                return_value={
+                    **server.DEFAULT_CONFIG,
+                    "notification_mode": "failures_only",
+                },
+            ),
+            patch.object(server.sys, "platform", "win32"),
+            patch.object(server, "_run", return_value=completed()) as run,
+        ):
+            success = server._write_notification("Done", "ok", "success")
+            failure = server._write_notification("Failed", "bad", "warning")
+        self.assertFalse(success["desktop_delivered"])
+        self.assertTrue(failure["desktop_delivered"])
+        run.assert_called_once()
+
+    def test_per_job_popup_opt_out_overrides_enabled_global_setting(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(server, "STATE_ROOT", Path(temporary) / "state"),
+            patch.object(
+                server,
+                "NOTIFICATIONS_PATH",
+                Path(temporary) / "state" / "notifications.jsonl",
+            ),
+            patch.object(
+                server,
+                "_load_config",
+                return_value={**server.DEFAULT_CONFIG, "notification_mode": "all"},
+            ),
+            patch.object(server, "_run") as run,
+        ):
+            result = server._write_notification("Title", "Body", desktop_popup=False)
+        self.assertFalse(result["desktop_delivered"])
+        run.assert_not_called()
+
+    def test_windows_notification_uses_one_toast_without_tray_balloon(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(server, "STATE_ROOT", Path(temporary) / "state"),
+            patch.object(
+                server,
+                "NOTIFICATIONS_PATH",
+                Path(temporary) / "state" / "notifications.jsonl",
+            ),
+            patch.object(
+                server,
+                "_load_config",
+                return_value={**server.DEFAULT_CONFIG, "notification_mode": "all"},
+            ),
+            patch.object(server.sys, "platform", "win32"),
+            patch.object(server, "_run", return_value=completed()) as run,
+        ):
+            result = server._write_notification("Title", "Body")
+        self.assertTrue(result["desktop_delivered"])
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "powershell.exe")
+        script = command[-1]
+        self.assertIn("ToastNotificationManager", script)
+        self.assertNotIn("NotifyIcon", script)
 
     def test_macos_notification_uses_osascript_arguments(self):
         with (
@@ -1425,7 +1800,7 @@ class ServerTests(unittest.TestCase):
             patch.object(
                 server,
                 "_load_config",
-                return_value={**server.DEFAULT_CONFIG, "notifications_enabled": True},
+                return_value={**server.DEFAULT_CONFIG, "notification_mode": "all"},
             ),
             patch.object(server.sys, "platform", "darwin"),
             patch.object(server, "_run", return_value=completed()) as run,
@@ -1447,7 +1822,7 @@ class ServerTests(unittest.TestCase):
             patch.object(
                 server,
                 "_load_config",
-                return_value={**server.DEFAULT_CONFIG, "notifications_enabled": True},
+                return_value={**server.DEFAULT_CONFIG, "notification_mode": "all"},
             ),
             patch.object(server.sys, "platform", "linux"),
             patch.object(server.shutil, "which", return_value="/usr/bin/notify-send"),

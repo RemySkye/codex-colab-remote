@@ -28,7 +28,7 @@ Call `transfer_status`, then `resume_transfer`. Cancel with confirmation if the 
 
 ## No desktop popup appears
 
-Call `test_notification` and inspect its reported backend. Windows notifications may be blocked by Focus Assist; macOS may require notification permission; Linux needs `notify-send` and a graphical notification service. `notification_history` works even without a popup backend.
+Desktop popups are disabled by default. If you intentionally want them, set `notification_mode` to `failures_only` or `all`, request `notify_on_completion=true` for the job, then call `test_notification`. Windows notifications may be blocked by Focus Assist; macOS may require notification permission; Linux needs `notify-send` and a graphical notification service. `notification_history` works without popups.
 
 ## Terminal windows appear while background work is running
 

@@ -13,9 +13,10 @@ Windows, Ubuntu/Linux, and macOS are supported. The same Python MCP server runs 
 - CPU, T4, L4, G4, H100, A100, TPU v5e-1, and TPU v6e-1 runtimes
 - Native Python, R, and Julia kernels; High-RAM and runtime-version selection
 - Arbitrary Linux terminal commands without SSH or a public tunnel
-- Monitored jobs, progress, desktop notifications, session lifetimes, cleanup, and opt-in recovery
+- Monitored jobs, progress, silent completion history, opt-in desktop notifications, session lifetimes, cleanup, and recovery
 - Resumable parallel file/folder transfers with compression, checksums, cancellation, and resume
 - Sandboxed Google Drive storage for checkpoints, models, datasets, folders, and notebooks
+- Documented owner-only configuration with session limits, transfer defaults, safe retries, and checkpoint paths
 - Optional short-lived Ed25519 SSH through ngrok, disabled by default
 - OAuth token isolation, restricted local-file roots, output redaction, and cost acknowledgement
 
@@ -131,7 +132,7 @@ The same guides are published in the repository's GitHub Wiki.
 - Google controls capacity, quota, idle shutdown, and maximum duration. This project does not bypass those rules.
 - `/content` is temporary. Download or checkpoint important data before cleanup.
 - Recovery can recreate opted-in work but cannot restore VM memory or lost ephemeral files.
-- High-RAM/runtime combinations may be unavailable. The plugin reports the measured result.
+- L4, G4, H100, v5e-1, and v6e-1 automatically use High-RAM; other High-RAM/runtime combinations may be unavailable. The plugin reports the measured result.
 - A heartbeat monitors legitimate work; it is not an anti-idle bypass.
 - Google Cloud Storage (GCS) bucket integration is planned rather than included in the current Drive implementation.
 

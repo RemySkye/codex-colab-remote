@@ -54,14 +54,36 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
 
         config = tools["set_config"].inputSchema["properties"]
         self.assertNotIn("ssh_secret_name", config)
+        notification_mode = next(
+            item
+            for item in config["notification_mode"]["anyOf"]
+            if "enum" in item
+        )
+        self.assertEqual(
+            notification_mode["enum"], ["off", "failures_only", "all"]
+        )
+        def integer_schema(name):
+            return next(
+                item
+                for item in config[name]["anyOf"]
+                if item.get("type") == "integer"
+            )
+        self.assertEqual(integer_schema("max_concurrent_sessions")["maximum"], 64)
+        self.assertEqual(integer_schema("transfer_parallelism")["maximum"], 8)
+        self.assertEqual(integer_schema("retry_attempts")["maximum"], 10)
 
         prepare = tools["prepare_language"].inputSchema["properties"]
         self.assertEqual(set(prepare), {"session_name", "language"})
         self.assertNotIn("acknowledge_external_download", prepare)
 
         transfer = tools["start_upload"].inputSchema["properties"]
-        self.assertEqual(transfer["parallelism"]["minimum"], 1)
-        self.assertEqual(transfer["parallelism"]["maximum"], 8)
+        parallelism = next(
+            item
+            for item in transfer["parallelism"]["anyOf"]
+            if item.get("type") == "integer"
+        )
+        self.assertEqual(parallelism["minimum"], 1)
+        self.assertEqual(parallelism["maximum"], 8)
         self.assertTrue(all(item.get("description") for item in transfer.values()))
 
         for tool in tools.values():

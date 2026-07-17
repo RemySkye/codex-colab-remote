@@ -11,7 +11,7 @@ Every parameter has a machine-readable description and range. Choice fields are 
 - `list_sessions`, `create_session`, `session_status`, `set_session_lifetime`, `stop_session`
 - `recovery_status`, `recover_session`
 
-`create_session` uses `high_ram=true` or `false`. `set_config` uses `default_high_ram`. Creating or reallocating a runtime requires explicit cost acknowledgement.
+`create_session` uses `high_ram=true` or `false`. `set_config` uses `default_high_ram`. L4, G4, H100, v5e-1, and v6e-1 automatically override `false` because those accelerators require High-RAM; CPU, T4, and A100 keep the selected value. Creating or reallocating a runtime requires explicit cost acknowledgement.
 
 ## Code and terminal
 
@@ -25,14 +25,14 @@ Use `execute_code` for native kernel code and `terminal_exec` for arbitrary Linu
 - `start_job`, `job_status`, `job_logs`, `watch_job`, `stop_job`
 - `notification_history`, `test_notification`
 
-Jobs run under `tmux`, expose logs/exit status/heartbeat, may write JSON progress, and can notify or stop the session at completion. Recovery restarts only explicitly opted-in, restart-safe jobs.
+Jobs run under `tmux`, expose logs/exit status/heartbeat, may write JSON progress, and can stop the session at completion. Completion history is silent by default; desktop popups require both global and per-job opt-in. Recovery restarts only explicitly opted-in, restart-safe jobs.
 
 ## Files and transfers
 
 - `upload_file`, `download_file`, `list_files`
 - `start_upload`, `start_download`, `transfer_status`, `list_transfers`, `cancel_transfer`, `resume_transfer`
 
-Managed transfers support folders, compression, 1–8 parallel chunks, checksums, cancellation, and interruption-safe resume. Every local path must be within an approved root.
+Managed transfers support folders, compression, 1–8 parallel chunks, checksums, bounded chunk retries, cancellation, and interruption-safe resume. Omitted compression and parallelism values use configuration defaults. Every local path must be within an approved root.
 
 ## Notebooks and Drive
 
@@ -47,7 +47,7 @@ Managed transfers support folders, compression, 1–8 parallel chunks, checksums
 
 `mount_google_drive` creates `MyDrive/codex-colab` when it is missing. If it returns `authorization_required=true`, approve Google in the opened browser and then call `complete_google_drive_mount`; the plugin keeps that same official CLI process alive so it can finish credential propagation. Every `drive_path` is relative to the protected folder; absolute paths, traversal, symlink escapes, and access to other mounted Drive folders are rejected. Deletion requires `confirm=true`. The save and restore tools copy complete files or folders directly between the Colab VM and Drive, without routing data through the local PC.
 
-Use fast `/content` storage for active training and periodically checkpoint important outputs into the returned Drive workspace. The plugin does not force an autosave policy: Codex may configure framework checkpoint code when the user requests it. Drive mounting may require the user to complete an interactive Google authorization step in Colab. Never provide that authorization material to Codex.
+Use fast `/content` storage for active training and periodically checkpoint important outputs into the returned Drive workspace. A save with no `drive_path` uses the configured checkpoint folder. The plugin does not force an autosave policy: Codex may configure framework checkpoint code when the user requests it. Drive mounting may require the user to complete an interactive Google authorization step in Colab. Never provide that authorization material to Codex.
 
 ## Optional SSH
 

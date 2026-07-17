@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 import webbrowser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -25,16 +25,19 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 import drive_ops
+import config_io
 import managed_transfer
 import notebook_ops
 import process_utils
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_SCHEMA_PATH = PLUGIN_ROOT / "config_schema.json"
+CONFIG_DOCUMENTATION = json.loads(CONFIG_SCHEMA_PATH.read_text(encoding="utf-8"))
 STATE_ROOT = Path(
     os.environ.get("COLAB_REMOTE_STATE_DIR", Path.home() / ".codex" / "colab-remote")
 )
-CONFIG_PATH = STATE_ROOT / "config.json"
+CONFIG_PATH = STATE_ROOT / "config.jsonc"
 NOTIFICATIONS_PATH = STATE_ROOT / "notifications.jsonl"
 SESSIONS_PATH = STATE_ROOT / "sessions.json"
 MONITORS_ROOT = STATE_ROOT / "monitors"
@@ -45,6 +48,7 @@ DRIVE_MOUNTS_ROOT = STATE_ROOT / "drive-mounts"
 SSH_SECRET_NAME = "NGROK_AUTHTOKEN"
 
 ACCELERATORS = {"cpu", "t4", "l4", "g4", "h100", "a100", "v5e-1", "v6e-1"}
+HIGH_RAM_REQUIRED_ACCELERATORS = {"l4", "g4", "h100", "v5e-1", "v6e-1"}
 LANGUAGES = {"python", "julia", "r"}
 DIRECT_TRANSFER_LIMIT = 64 * 1024 * 1024
 TRANSFER_CHUNK_SIZE = 32 * 1024 * 1024
@@ -73,18 +77,8 @@ SENSITIVE_PATTERNS = [
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "distro": "Ubuntu",
-    "default_accelerator": "cpu",
-    "default_language": "python",
-    "default_runtime_version": "latest",
-    "default_high_ram": False,
-    "default_timeout_seconds": 3600,
-    "compute_warning_minutes": 60,
-    "default_max_lifetime_minutes": 0,
-    "notifications_enabled": True,
-    "require_cost_acknowledgement": True,
-    "allowed_local_roots": [],
-    "ssh_tunnel_enabled": False,
+    name: details["default"]
+    for name, details in CONFIG_DOCUMENTATION["settings"].items()
 }
 
 # Reusable public MCP types keep the generated tool schemas precise and compact.
@@ -151,6 +145,16 @@ DrivePath = Annotated[
         max_length=drive_ops.MAX_DRIVE_PATH_LENGTH,
     ),
 ]
+OptionalDrivePath = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Path relative to MyDrive/codex-colab; null saves under the configured "
+            "default_drive_checkpoint_folder using the source name."
+        ),
+        max_length=drive_ops.MAX_DRIVE_PATH_LENGTH,
+    ),
+]
 DriveMountPath = Annotated[
     Literal["/content/drive"],
     Field(
@@ -179,10 +183,21 @@ LineCount = Annotated[
     int,
     Field(description="Maximum number of recent lines to return.", ge=1, le=5000),
 ]
-Parallelism = Annotated[
-    int,
-    Field(description="Number of parallel transfer chunks.", ge=1, le=8),
+OptionalParallelism = Annotated[
+    int | None,
+    Field(
+        description="Parallel transfer chunks; null uses transfer_parallelism from config.",
+        ge=1,
+        le=8,
+    ),
 ]
+OptionalCompression = Annotated[
+    bool | None,
+    Field(
+        description="Compress the transfer; null uses transfer_compression from config. Folders are always archived."
+    ),
+]
+NotificationMode = Literal["off", "failures_only", "all"]
 OptionalAcceleratorName = Annotated[
     AcceleratorName | None,
     Field(description="Colab hardware accelerator; null uses the configured default."),
@@ -276,26 +291,81 @@ def _secure_state_root() -> None:
                 pass
 
 
+def _config_integer(config: dict[str, Any], name: str, minimum: int, maximum: int) -> int:
+    value = config[name]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = {**DEFAULT_CONFIG, **config}
+    normalized.pop("_documentation", None)
+    normalized.pop("prefer_high_ram", None)
+    normalized.pop("ssh_secret_name", None)
+    legacy_notifications = normalized.pop("notifications_enabled", None)
+    if "notification_mode" not in config and legacy_notifications is not None:
+        normalized["notification_mode"] = "all" if legacy_notifications else "off"
+    mode = str(normalized["notification_mode"]).strip().lower()
+    if mode not in {"off", "failures_only", "all"}:
+        raise ValueError("notification_mode must be off, failures_only, or all")
+    normalized["notification_mode"] = mode
+    normalized["max_concurrent_sessions"] = _config_integer(
+        normalized, "max_concurrent_sessions", 1, 64
+    )
+    normalized["transfer_parallelism"] = _config_integer(
+        normalized, "transfer_parallelism", 1, 8
+    )
+    normalized["retry_attempts"] = _config_integer(
+        normalized, "retry_attempts", 1, 10
+    )
+    normalized["default_timeout_seconds"] = _config_integer(
+        normalized, "default_timeout_seconds", 30, 86400
+    )
+    normalized["compute_warning_minutes"] = _config_integer(
+        normalized, "compute_warning_minutes", 5, 1440
+    )
+    normalized["default_max_lifetime_minutes"] = _config_integer(
+        normalized, "default_max_lifetime_minutes", 0, 1440
+    )
+    for name in ("default_high_ram", "transfer_compression", "ssh_tunnel_enabled"):
+        if not isinstance(normalized[name], bool):
+            raise ValueError(f"{name} must be true or false")
+    folder = drive_ops.normalize_drive_path(
+        str(normalized["default_drive_checkpoint_folder"]), allow_root=False
+    )
+    normalized["default_drive_checkpoint_folder"] = folder
+    normalized["require_cost_acknowledgement"] = True
+    return normalized
+
+
 def _load_config() -> dict[str, Any]:
     _secure_state_root()
-    config = dict(DEFAULT_CONFIG)
-    if CONFIG_PATH.exists():
-        loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        if not isinstance(loaded, dict):
-            raise ValueError("Colab Remote config must be a JSON object")
+    loaded: dict[str, Any] = {}
+    legacy_path = CONFIG_PATH.with_suffix(".json")
+    source = CONFIG_PATH if CONFIG_PATH.exists() else legacy_path
+    if source.exists():
+        loaded = config_io.loads(source.read_text(encoding="utf-8"))
         if "default_high_ram" not in loaded and "prefer_high_ram" in loaded:
             loaded["default_high_ram"] = bool(loaded["prefer_high_ram"])
-        loaded.pop("prefer_high_ram", None)
-        loaded.pop("ssh_secret_name", None)
-        config.update(loaded)
-    config["require_cost_acknowledgement"] = True
+    config = _normalize_config(loaded)
+    rendered = config_io.render(config, CONFIG_DOCUMENTATION)
+    if not CONFIG_PATH.exists() or CONFIG_PATH.read_text(encoding="utf-8") != rendered:
+        _save_config(config)
+    if legacy_path != CONFIG_PATH:
+        legacy_path.unlink(missing_ok=True)
     return config
 
 
 def _save_config(config: dict[str, Any]) -> None:
     _secure_state_root()
+    config = _normalize_config(config)
     temporary = CONFIG_PATH.with_suffix(".tmp")
-    temporary.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(
+        config_io.render(config, CONFIG_DOCUMENTATION), encoding="utf-8"
+    )
     try:
         os.chmod(temporary, 0o600)
     except OSError:
@@ -677,16 +747,34 @@ def _colab(
         index = arguments.index("-s")
         if index + 1 < len(arguments):
             session = _validate_session_name(arguments[index + 1])
-    if session is None or not serialize_session:
-        return _wsl(command, input_text=input_text, timeout=timeout, check=check)
-    if arguments and arguments[0] not in {"sessions", "status", "stop"}:
-        if _drive_mount_is_active(session):
-            raise RuntimeError(
-                "Google Drive mounting is waiting on this session. Complete it with "
-                "complete_google_drive_mount before running another session command."
-            )
-    with _session_cli_lock(session, max(30, min(timeout, 300))):
-        return _wsl(command, input_text=input_text, timeout=timeout, check=check)
+    if (
+        session is not None
+        and serialize_session
+        and arguments
+        and arguments[0] not in {"sessions", "status", "stop"}
+        and _drive_mount_is_active(session)
+    ):
+        raise RuntimeError(
+            "Google Drive mounting is waiting on this session. Complete it with "
+            "complete_google_drive_mount before running another session command."
+        )
+
+    def invoke() -> subprocess.CompletedProcess[str]:
+        if session is None or not serialize_session:
+            return _wsl(command, input_text=input_text, timeout=timeout, check=check)
+        with _session_cli_lock(session, max(30, min(timeout, 300))):
+            return _wsl(command, input_text=input_text, timeout=timeout, check=check)
+
+    retry_safe = bool(arguments and arguments[0] in {"sessions", "status", "ls"})
+    attempts = int(_load_config()["retry_attempts"]) if retry_safe and check else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return invoke()
+        except RuntimeError:
+            if attempt == attempts:
+                raise
+            time.sleep(min(2 ** (attempt - 1), 4))
+    raise AssertionError("unreachable")
 
 
 def _output(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
@@ -1087,7 +1175,11 @@ PY'''
 
 
 def _write_notification(
-    title: str, message: str, level: str = "info"
+    title: str,
+    message: str,
+    level: str = "info",
+    *,
+    desktop_popup: bool = True,
 ) -> dict[str, Any]:
     config = _load_config()
     event = {
@@ -1105,7 +1197,13 @@ def _write_notification(
         pass
 
     delivered = False
-    if config["notifications_enabled"] and sys.platform == "win32":
+    notification_mode = config["notification_mode"]
+    mode_allows_popup = notification_mode == "all" or (
+        notification_mode == "failures_only"
+        and level.lower() in {"warning", "error", "failure", "failed"}
+    )
+    popup_enabled = bool(desktop_popup and mode_allows_popup)
+    if popup_enabled and sys.platform == "win32":
         script = r"""
 $ErrorActionPreference='Stop'
 $appId='Codex.ColabRemote'
@@ -1123,21 +1221,6 @@ $toast=[Windows.UI.Notifications.ToastNotification]::new($xml)
 $toast.SuppressPopup=$false
 try { $toast.Priority=[Windows.UI.Notifications.ToastNotificationPriority]::High } catch { }
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$tray=New-Object System.Windows.Forms.NotifyIcon
-try {
-  $tray.Icon=[System.Drawing.SystemIcons]::Information
-  $tray.Visible=$true
-  $tray.BalloonTipTitle=$env:COLAB_REMOTE_NOTIFY_TITLE
-  $tray.BalloonTipText=$env:COLAB_REMOTE_NOTIFY_BODY
-  $tray.BalloonTipIcon=[System.Windows.Forms.ToolTipIcon]::Info
-  $tray.ShowBalloonTip(8000)
-  Start-Sleep -Seconds 9
-} finally {
-  $tray.Visible=$false
-  $tray.Dispose()
-}
 """
         env = os.environ.copy()
         env["COLAB_REMOTE_NOTIFY_TITLE"] = event["title"]
@@ -1151,7 +1234,7 @@ try {
             ).returncode
             == 0
         )
-    elif config["notifications_enabled"] and sys.platform == "darwin":
+    elif popup_enabled and sys.platform == "darwin":
         apple_script = (
             "on run argv\n"
             "display notification (item 2 of argv) with title (item 1 of argv)\n"
@@ -1171,7 +1254,7 @@ try {
             ).returncode
             == 0
         )
-    elif config["notifications_enabled"] and shutil.which("notify-send"):
+    elif popup_enabled and shutil.which("notify-send"):
         delivered = (
             _run(
                 [
@@ -1192,6 +1275,7 @@ def _monitor_job(
     session_name: str,
     job_name: str,
     interval_seconds: int,
+    notify_on_completion: bool = False,
     stop_session_on_finish: bool = False,
     recover_on_runtime_loss: bool = False,
 ) -> None:
@@ -1203,6 +1287,7 @@ def _monitor_job(
             "session_name": session_name,
             "job_name": job_name,
             "interval_seconds": interval_seconds,
+            "notify_on_completion": notify_on_completion,
             "stop_session_on_finish": stop_session_on_finish,
             "recover_on_runtime_loss": recover_on_runtime_loss,
             "watcher_pid": os.getpid(),
@@ -1217,6 +1302,7 @@ def _monitor_job(
                     "Colab monitor stopped",
                     f"Job {job_name} no longer exists.",
                     "warning",
+                    desktop_popup=notify_on_completion,
                 )
                 break
             state = status.get("status")
@@ -1230,6 +1316,7 @@ def _monitor_job(
                     "Colab job completed",
                     f"{job_name} on {session_name} finished with exit code {exit_code}.",
                     level,
+                    desktop_popup=notify_on_completion,
                 )
                 if stop_session_on_finish:
                     try:
@@ -1239,6 +1326,7 @@ def _monitor_job(
                             "Colab automatic shutdown failed",
                             f"{session_name}: {_redact(str(exc))}",
                             "warning",
+                            desktop_popup=notify_on_completion,
                         )
                 break
         except Exception as exc:
@@ -1257,6 +1345,7 @@ def _monitor_job(
                             "Colab automatic recovery failed",
                             f"{job_name}: {_redact(str(recovery_exc))}",
                             "warning",
+                            desktop_popup=notify_on_completion,
                         )
                 if recovered:
                     break
@@ -1264,6 +1353,7 @@ def _monitor_job(
                     "Colab monitor stopped",
                     f"{job_name}: {_redact(str(exc))}",
                     "warning",
+                    desktop_popup=notify_on_completion,
                 )
                 break
         time.sleep(interval_seconds)
@@ -1277,6 +1367,7 @@ def _start_monitor(
     session_name: str,
     job_name: str,
     interval_seconds: int,
+    notify_on_completion: bool = False,
     stop_session_on_finish: bool = False,
     recover_on_runtime_loss: bool = False,
 ) -> dict[str, Any]:
@@ -1299,6 +1390,7 @@ def _start_monitor(
             "session_name": session_name,
             "job_name": job_name,
             "interval_seconds": interval_seconds,
+            "notify_on_completion": notify_on_completion,
             "stop_session_on_finish": stop_session_on_finish,
             "recover_on_runtime_loss": recover_on_runtime_loss,
             "heartbeat": int(time.time()),
@@ -1313,6 +1405,7 @@ def _start_monitor(
                     session_name,
                     job_name,
                     str(interval_seconds),
+                    "1" if notify_on_completion else "0",
                     "1" if stop_session_on_finish else "0",
                     "1" if recover_on_runtime_loss else "0",
                 ],
@@ -1337,6 +1430,7 @@ def _resume_saved_monitors() -> None:
                 str(record["session_name"]),
                 str(record["job_name"]),
                 interval,
+                bool(record.get("notify_on_completion")),
                 bool(record.get("stop_session_on_finish")),
                 bool(record.get("recover_on_runtime_loss")),
             )
@@ -1528,7 +1622,7 @@ def _recover_session_impl(
                 job_name,
                 str(recipe["command"]),
                 workdir=str(recipe.get("workdir", "/content")),
-                notify_on_completion=bool(recipe.get("notify_on_completion", True)),
+                notify_on_completion=bool(recipe.get("notify_on_completion", False)),
                 monitor_interval_seconds=int(
                     recipe.get("monitor_interval_seconds", 30)
                 ),
@@ -1565,7 +1659,9 @@ def set_config(
     default_runtime_version: OptionalRuntimeVersion = None,
     default_high_ram: Annotated[
         bool | None,
-        Field(description="Default High-RAM request; false requests standard RAM."),
+        Field(
+            description="Default High-RAM request. L4, G4, H100, v5e-1, and v6e-1 always use High-RAM."
+        ),
     ] = None,
     default_timeout_seconds: Annotated[
         int | None,
@@ -1576,8 +1672,33 @@ def set_config(
         Field(description="Warn when a session reaches this runtime.", ge=5, le=1440),
     ] = None,
     default_max_lifetime_minutes: OptionalMaxLifetimeMinutes = None,
-    notifications_enabled: Annotated[
-        bool | None, Field(description="Enable desktop job-completion notifications.")
+    notification_mode: Annotated[
+        NotificationMode | None,
+        Field(
+            description="Desktop popup policy: off, failures_only, all, or null to keep the current mode."
+        ),
+    ] = None,
+    max_concurrent_sessions: Annotated[
+        int | None,
+        Field(description="Maximum simultaneous active Colab assignments.", ge=1, le=64),
+    ] = None,
+    transfer_compression: Annotated[
+        bool | None,
+        Field(description="Default managed-transfer compression behavior."),
+    ] = None,
+    transfer_parallelism: Annotated[
+        int | None,
+        Field(description="Default simultaneous managed-transfer chunks.", ge=1, le=8),
+    ] = None,
+    retry_attempts: Annotated[
+        int | None,
+        Field(description="Total attempts for retry-safe operations.", ge=1, le=10),
+    ] = None,
+    default_drive_checkpoint_folder: Annotated[
+        str | None,
+        Field(
+            description="Relative folder inside MyDrive/codex-colab used when a Drive save omits drive_path."
+        ),
     ] = None,
     allowed_local_roots: Annotated[
         list[str] | None,
@@ -1623,8 +1744,22 @@ def set_config(
         config["default_max_lifetime_minutes"] = max(
             0, min(default_max_lifetime_minutes, 1440)
         )
-    if notifications_enabled is not None:
-        config["notifications_enabled"] = notifications_enabled
+    if notification_mode is not None:
+        config["notification_mode"] = notification_mode
+    if max_concurrent_sessions is not None:
+        config["max_concurrent_sessions"] = max_concurrent_sessions
+    if transfer_compression is not None:
+        config["transfer_compression"] = transfer_compression
+    if transfer_parallelism is not None:
+        config["transfer_parallelism"] = transfer_parallelism
+    if retry_attempts is not None:
+        config["retry_attempts"] = retry_attempts
+    if default_drive_checkpoint_folder is not None:
+        config["default_drive_checkpoint_folder"] = (
+            drive_ops.normalize_drive_path(
+                default_drive_checkpoint_folder, allow_root=False
+            )
+        )
     if distro is not None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]{0,63}", distro):
             raise ValueError("Invalid WSL distribution name")
@@ -1732,15 +1867,19 @@ def doctor() -> dict[str, Any]:
     checks["high_ram_supported_by_cli"] = False
     checks["high_ram_supported_by_compatibility_wrapper"] = True
     checks["runtime_version_supported_by_compatibility_wrapper"] = True
-    checks["desktop_notification_backend"] = (
-        "windows-toast"
-        if sys.platform == "win32"
-        else "macos-notification-center"
-        if sys.platform == "darwin"
-        else "notify-send"
-        if shutil.which("notify-send")
-        else "history-only"
-    )
+    checks["desktop_notification_mode"] = checks["config"]["notification_mode"]
+    if checks["config"]["notification_mode"] == "off":
+        checks["desktop_notification_backend"] = "disabled"
+    else:
+        checks["desktop_notification_backend"] = (
+            "windows-toast"
+            if sys.platform == "win32"
+            else "macos-notification-center"
+            if sys.platform == "darwin"
+            else "notify-send"
+            if shutil.which("notify-send")
+            else "history-only"
+        )
     checks["native_runtime_languages"] = {
         "default": "python",
         "python": "python3",
@@ -1763,6 +1902,25 @@ def list_sessions() -> dict[str, Any]:
     return _output(_colab(["sessions"], timeout=30))
 
 
+def _active_session_count(output: str) -> int:
+    return sum(
+        1
+        for line in output.splitlines()
+        if re.match(r"^\[[^\]]+\]\s+\S+\s+\|\s+Hardware:", line.strip())
+    )
+
+
+def _enforce_session_limit(config: dict[str, Any]) -> dict[str, int]:
+    listing = _colab(["sessions"], timeout=30)
+    active = _active_session_count(listing.stdout + "\n" + listing.stderr)
+    maximum = int(config["max_concurrent_sessions"])
+    if active >= maximum:
+        raise RuntimeError(
+            f"Active Colab session limit reached ({active}/{maximum}). Stop a session or increase max_concurrent_sessions."
+        )
+    return {"active_sessions": active, "max_concurrent_sessions": maximum}
+
+
 @mcp.tool()
 def create_session(
     session_name: SessionName,
@@ -1771,7 +1929,7 @@ def create_session(
     high_ram: Annotated[
         bool | None,
         Field(
-            description="Request High-RAM (true), standard RAM (false), or use the default (null)."
+            description="Request High-RAM (true), standard RAM (false), or use the default (null). L4, G4, H100, v5e-1, and v6e-1 force High-RAM because no standard-RAM option exists."
         ),
     ] = None,
     runtime_version: OptionalRuntimeVersion = None,
@@ -1796,7 +1954,9 @@ def create_session(
     selected_language = (language or config["default_language"]).lower()
     if selected_language not in LANGUAGES:
         raise ValueError(f"language must be one of {sorted(LANGUAGES)}")
-    selected_high_ram = config["default_high_ram"] if high_ram is None else high_ram
+    requested_high_ram = config["default_high_ram"] if high_ram is None else high_ram
+    high_ram_forced = selected in HIGH_RAM_REQUIRED_ACCELERATORS and not requested_high_ram
+    selected_high_ram = requested_high_ram or selected in HIGH_RAM_REQUIRED_ACCELERATORS
     selected_runtime_version = _normalize_runtime_version(
         runtime_version or config["default_runtime_version"]
     )
@@ -1815,7 +1975,12 @@ def create_session(
         raise PermissionError(
             warning + " Re-run with acknowledge_cost=true after the user accepts."
         )
+    concurrency = _enforce_session_limit(config)
     warnings = [warning]
+    if high_ram_forced:
+        warnings.append(
+            f"High-RAM was enabled automatically because {selected} is only available with High-RAM."
+        )
     result = _colab(
         ["new", "-s", session, *_accelerator_args(selected)],
         timeout=900,
@@ -1883,10 +2048,12 @@ def create_session(
         "language": selected_language,
         "native_language": native_language,
         "high_ram_requested": selected_high_ram,
+        "high_ram_forced_by_accelerator": high_ram_forced,
         "runtime_version": selected_runtime_version,
         "max_lifetime_minutes": selected_max_lifetime,
         "recovery_enabled": recovery_enabled,
         "max_recovery_attempts": selected_recovery_attempts,
+        "concurrency": concurrency,
         "lease": lease,
         "memory": memory,
         "compute": compute,
@@ -2121,6 +2288,16 @@ def _notebook_path(local_path: str, *, must_exist: bool) -> Path:
 
 def _drive_relative_path(path: str) -> str:
     return drive_ops.normalize_drive_path(path, allow_root=False)
+
+
+def _drive_save_path(source_name: str, requested: str | None) -> str:
+    if requested is not None:
+        return _drive_relative_path(requested)
+    folder = str(_load_config()["default_drive_checkpoint_folder"])
+    name = PurePosixPath(source_name.replace("\\", "/")).name
+    if not name or name in {".", ".."}:
+        raise ValueError("Could not derive a safe Drive item name from the source path")
+    return _drive_relative_path(f"{folder}/{name}")
 
 
 @mcp.tool()
@@ -2875,7 +3052,7 @@ def create_drive_folder(
 def save_to_drive(
     session_name: SessionName,
     remote_path: RemotePath,
-    drive_path: DrivePath,
+    drive_path: OptionalDrivePath = None,
     overwrite: Annotated[
         bool, Field(description="Replace an existing Drive file or folder.")
     ] = False,
@@ -2887,7 +3064,7 @@ def save_to_drive(
     """Copy a Colab file or folder into MyDrive/codex-colab."""
     session = _validate_session_name(session_name)
     source = _validate_remote_path(remote_path)
-    relative = _drive_relative_path(drive_path)
+    relative = _drive_save_path(source, drive_path)
     _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
     return {
         "session_name": session,
@@ -2999,7 +3176,7 @@ def delete_drive_path(
 def save_notebook_to_drive(
     session_name: SessionName,
     local_path: LocalPath,
-    drive_path: DrivePath,
+    drive_path: OptionalDrivePath = None,
     mount_if_needed: Annotated[
         bool,
         Field(description="Mount Drive and create codex-colab when needed."),
@@ -3008,7 +3185,7 @@ def save_notebook_to_drive(
     """Save an approved local notebook inside MyDrive/codex-colab."""
     session = _validate_session_name(session_name)
     source = _notebook_path(local_path, must_exist=True)
-    relative = _drive_relative_path(drive_path)
+    relative = _drive_save_path(source.name, drive_path)
     notebook_ops.load(source)
     _ensure_drive_workspace(session, mount_if_needed=mount_if_needed)
     temporary = f"/content/.codex-remote/notebooks/{secrets.token_hex(8)}.ipynb"
@@ -3279,19 +3456,23 @@ def start_upload(
     session_name: SessionName,
     local_path: LocalPath,
     remote_path: RemotePath,
-    compress: Annotated[
-        bool,
-        Field(
-            description="Compress before transfer; folders are always archived safely."
-        ),
-    ] = False,
-    parallelism: Parallelism = 4,
+    compress: OptionalCompression = None,
+    parallelism: OptionalParallelism = None,
     resume: Annotated[
         bool, Field(description="Reuse verified completed chunks after interruption.")
     ] = True,
 ) -> dict[str, Any]:
     """Start a resumable parallel file/folder upload, optionally compressed as tar.gz."""
     source = _allowed_local_path(local_path, must_exist=True)
+    config = _load_config()
+    selected_compression = (
+        bool(config["transfer_compression"]) if compress is None else compress
+    )
+    selected_parallelism = (
+        int(config["transfer_parallelism"])
+        if parallelism is None
+        else parallelism
+    )
     return managed_transfer.spawn(
         sys.modules[__name__],
         {
@@ -3300,8 +3481,9 @@ def start_upload(
             "session_name": _validate_session_name(session_name),
             "local_path": str(source),
             "remote_path": _validate_remote_path(remote_path),
-            "compress": compress or source.is_dir(),
-            "parallelism": max(1, min(parallelism, 8)),
+            "compress": selected_compression or source.is_dir(),
+            "parallelism": max(1, min(selected_parallelism, 8)),
+            "retry_attempts": int(config["retry_attempts"]),
             "resume": resume,
             "created_at": int(time.time()),
             "bytes_done": 0,
@@ -3315,10 +3497,8 @@ def start_download(
     session_name: SessionName,
     remote_path: RemotePath,
     local_path: LocalPath,
-    compress: Annotated[
-        bool, Field(description="Compress remotely before transfer when beneficial.")
-    ] = False,
-    parallelism: Parallelism = 4,
+    compress: OptionalCompression = None,
+    parallelism: OptionalParallelism = None,
     resume: Annotated[
         bool, Field(description="Reuse verified completed chunks after interruption.")
     ] = True,
@@ -3328,6 +3508,15 @@ def start_download(
 ) -> dict[str, Any]:
     """Start a resumable parallel file/folder download, optionally compressed as tar.gz."""
     destination = _allowed_local_path(local_path, must_exist=False)
+    config = _load_config()
+    selected_compression = (
+        bool(config["transfer_compression"]) if compress is None else compress
+    )
+    selected_parallelism = (
+        int(config["transfer_parallelism"])
+        if parallelism is None
+        else parallelism
+    )
     return managed_transfer.spawn(
         sys.modules[__name__],
         {
@@ -3336,8 +3525,9 @@ def start_download(
             "session_name": _validate_session_name(session_name),
             "local_path": str(destination),
             "remote_path": _validate_remote_path(remote_path),
-            "compress": compress,
-            "parallelism": max(1, min(parallelism, 8)),
+            "compress": selected_compression,
+            "parallelism": max(1, min(selected_parallelism, 8)),
+            "retry_attempts": int(config["retry_attempts"]),
             "resume": resume,
             "overwrite": overwrite,
             "created_at": int(time.time()),
@@ -3491,8 +3681,11 @@ def start_job(
     ],
     workdir: RemoteWorkdir = "/content",
     notify_on_completion: Annotated[
-        bool, Field(description="Send a desktop notification when the job finishes.")
-    ] = True,
+        bool,
+        Field(
+            description="Request a completion popup if desktop notifications are also enabled globally."
+        ),
+    ] = False,
     monitor_interval_seconds: Annotated[
         int, Field(description="Local monitoring interval in seconds.", ge=10, le=300)
     ] = 30,
@@ -3555,6 +3748,7 @@ echo CODEX_JOB_STARTED={job}"""
             session,
             job,
             interval,
+            notify_on_completion,
             stop_session_on_finish,
             recover_on_runtime_loss,
         )
@@ -3599,6 +3793,12 @@ def watch_job(
     interval_seconds: Annotated[
         int, Field(description="Polling interval in seconds.", ge=10, le=300)
     ] = 30,
+    notify_on_completion: Annotated[
+        bool,
+        Field(
+            description="Request a completion popup if desktop notifications are also enabled globally."
+        ),
+    ] = False,
     stop_session_on_finish: Annotated[
         bool,
         Field(description="Release the Colab VM automatically when this job finishes."),
@@ -3610,11 +3810,12 @@ def watch_job(
         ),
     ] = False,
 ) -> dict[str, Any]:
-    """Start a local background monitor and desktop completion notification."""
+    """Start a background monitor with optional auto-stop, recovery, and popup."""
     return _start_monitor(
         _validate_session_name(session_name),
         _validate_job_name(job_name),
         max(10, min(interval_seconds, 300)),
+        notify_on_completion,
         stop_session_on_finish,
         recover_on_runtime_loss,
     )
@@ -4152,20 +4353,21 @@ def notification_history(
 
 @mcp.tool()
 def test_notification() -> dict[str, Any]:
-    """Send a harmless desktop notification to verify notification support."""
+    """Test the opt-in popup backend; when disabled, only add silent history."""
     return _write_notification(
         "Colab Remote", "Completion notifications are working.", "success"
     )
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 7 and sys.argv[1] == "--monitor-job":
+    if len(sys.argv) == 8 and sys.argv[1] == "--monitor-job":
         _monitor_job(
             sys.argv[2],
             sys.argv[3],
             int(sys.argv[4]),
             sys.argv[5] == "1",
             sys.argv[6] == "1",
+            sys.argv[7] == "1",
         )
     elif len(sys.argv) == 3 and sys.argv[1] == "--lease-session":
         _lease_session(sys.argv[2])

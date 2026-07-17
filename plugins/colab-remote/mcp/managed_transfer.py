@@ -173,9 +173,21 @@ def parallel_parts(
     chunks_done = int(state.get("chunks_done", 0))
     bytes_done = int(state.get("bytes_done", 0))
     workers = max(1, min(int(state.get("parallelism", 4)), 8))
+    attempts = max(1, min(int(state.get("retry_attempts", 3)), 10))
+
+    def retry(name: str) -> None:
+        for attempt in range(1, attempts + 1):
+            try:
+                operation(name)
+                return
+            except Exception:
+                if attempt == attempts or cancelled(api, transfer_id):
+                    raise
+                time.sleep(min(2 ** (attempt - 1), 4))
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_map = {
-            pool.submit(operation, name): (name, size) for name, size in tasks
+            pool.submit(retry, name): (name, size) for name, size in tasks
         }
         for future in as_completed(future_map):
             future.result()
