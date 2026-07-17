@@ -22,6 +22,33 @@ def completed(returncode=0, stdout="", stderr=""):
 
 
 class InstallerTests(unittest.TestCase):
+    def test_desktop_notifications_are_opt_in(self):
+        disabled = installer.Installer(
+            installer.parser().parse_args([]), platform="linux"
+        )
+        enabled = installer.Installer(
+            installer.parser().parse_args(["--enable-notifications"]),
+            platform="linux",
+        )
+        self.assertEqual(disabled.default_config()["notification_mode"], "off")
+        self.assertEqual(enabled.default_config()["notification_mode"], "all")
+
+    def test_default_config_and_documentation_cover_operational_defaults(self):
+        subject = installer.Installer(
+            installer.parser().parse_args([]), platform="linux"
+        )
+        config = subject.default_config()
+        self.assertEqual(config["max_concurrent_sessions"], 8)
+        self.assertFalse(config["transfer_compression"])
+        self.assertEqual(config["transfer_parallelism"], 4)
+        self.assertEqual(config["retry_attempts"], 3)
+        self.assertEqual(config["default_drive_checkpoint_folder"], "checkpoints")
+        self.assertNotIn("_documentation", config)
+        self.assertIn(
+            "max_concurrent_sessions",
+            subject.configuration_documentation()["settings"],
+        )
+
     def test_windows_and_posix_flags_share_one_parser(self):
         windows = installer.parser().parse_args(
             [
@@ -55,10 +82,12 @@ class InstallerTests(unittest.TestCase):
             )
             subject = installer.Installer(options, platform="linux")
             subject.write_config()
-            config_path = state / "config.json"
-            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config_path = state / "config.jsonc"
+            text = config_path.read_text(encoding="utf-8")
+            config = installer.parse_jsonc(text)
             self.assertTrue(config["default_high_ram"])
             self.assertTrue(config["ssh_tunnel_enabled"])
+            self.assertIn("// Default native Colab kernel language.", text)
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
                 self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
@@ -228,7 +257,8 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             state.mkdir()
-            config_path = state / "config.json"
+            legacy_path = state / "config.json"
+            config_path = state / "config.jsonc"
             original = {
                 "distro": "ExistingLinux",
                 "default_accelerator": "t4",
@@ -237,19 +267,22 @@ class InstallerTests(unittest.TestCase):
                 "custom_future_setting": "preserved",
                 "require_cost_acknowledgement": False,
             }
-            config_path.write_text(json.dumps(original), encoding="utf-8")
+            legacy_path.write_text(json.dumps(original), encoding="utf-8")
             options = installer.parser().parse_args(
                 ["--state-root", str(state), "--default-accelerator", "a100"]
             )
             options.explicit_config_options = {"default_accelerator"}
             subject = installer.Installer(options, platform="linux")
             subject.write_config()
-            updated = json.loads(config_path.read_text(encoding="utf-8"))
+            updated_text = config_path.read_text(encoding="utf-8")
+            updated = installer.parse_jsonc(updated_text)
         self.assertEqual(updated["default_accelerator"], "a100")
         self.assertEqual(updated["default_language"], "julia")
         self.assertEqual(updated["allowed_local_roots"], ["/keep/me"])
         self.assertEqual(updated["custom_future_setting"], "preserved")
         self.assertTrue(updated["require_cost_acknowledgement"])
+        self.assertFalse(legacy_path.exists())
+        self.assertIn("// Preserved additional setting", updated_text)
 
     def test_windows_update_reuses_configured_wsl_distro(self):
         with tempfile.TemporaryDirectory() as temporary:

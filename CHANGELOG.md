@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.7
+
+- Automatically force High-RAM for L4, G4, H100, v5e-1, and v6e-1 allocations, even when a caller supplies `high_ram=false`.
+- Replaced the notification boolean with `off`, `failures_only`, and `all` modes while safely migrating existing configuration.
+- Added an enforced default limit of eight concurrent Colab sessions.
+- Added managed-transfer compression, parallelism, and bounded retry defaults.
+- Added a default Drive checkpoint folder used when save tools omit `drive_path`.
+- Added a real `config.jsonc` with comments directly above every setting, safe comment/trailing-comma parsing, canonical comment regeneration, and automatic migration from `config.json`.
+
+## 0.6.6
+
+- Disabled desktop notification popups by default while retaining silent notification history.
+- Made job completion popups require explicit per-job and global opt-in.
+- Removed the duplicate legacy Windows tray balloon so an enabled notification produces only one toast.
+- Updated diagnostics, installer flags, documentation, and tests for the quieter behavior.
+
 ## 0.6.5
 
 - Fixed Codex MCP registration by replacing an unsupported `${__dirname}` placeholder with plugin-relative paths and an explicit plugin working directory.

@@ -21,7 +21,7 @@ Rerun the same installer command used for installation. No separate updater is r
 
 The installer detects `colab-remote@colab-remote`, refreshes Git-backed marketplaces, reuses a valid local development marketplace, repairs a stale local registration that no longer exposes the plugin, installs the new version, and verifies the result. It does not run a separate uninstall first; Codex handles the replacement.
 
-Existing Colab OAuth credentials are not reopened or replaced during an update. Existing `~/.codex/colab-remote/config.json` values and future unknown settings are preserved. If an installer configuration option is explicitly supplied again, only that setting is updated.
+Existing Colab OAuth credentials are not reopened or replaced during an update. Existing `~/.codex/colab-remote/config.jsonc` values and future unknown settings are preserved. Older `config.json` files are migrated automatically. If an installer configuration option is explicitly supplied again, only that setting is updated.
 
 Restart Codex and open a new task after the installer reports that the plugin was updated.
 

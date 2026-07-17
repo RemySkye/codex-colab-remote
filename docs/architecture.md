@@ -28,4 +28,4 @@ Local state lives in `~/.codex/colab-remote` by default. It contains configurati
 
 Google Cloud Storage (GCS) is not a current dependency; bucket support remains a future roadmap item.
 
-Desktop notifications use Windows PowerShell toast APIs, `osascript` on macOS, or `notify-send` on Linux when available. Notification history remains available when a desktop backend cannot display a popup.
+Opt-in desktop notifications use one Windows toast, `osascript` on macOS, or `notify-send` on Linux when available. Popups are disabled by default, while notification history remains available.

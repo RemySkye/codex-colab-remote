@@ -43,12 +43,136 @@ CONFIG_FLAG_DESTINATIONS = {
     "-PreferHighRam": "high_ram",
     "--allowed-root": "allowed_root",
     "-AllowedLocalRoot": "allowed_root",
-    "--disable-notifications": "disable_notifications",
-    "-DisableNotifications": "disable_notifications",
+    "--notification-mode": "notification_mode",
+    "--enable-notifications": "notification_mode",
+    "-EnableNotifications": "notification_mode",
+    "--disable-notifications": "notification_mode",
+    "-DisableNotifications": "notification_mode",
     "--enable-ssh": "enable_ssh",
     "-EnableSshTunnel": "enable_ssh",
 }
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    output = []
+    index = 0
+    in_string = escaped = line_comment = block_comment = False
+    while index < len(text):
+        character = text[index]
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if line_comment:
+            if character in "\r\n":
+                line_comment = False
+                output.append(character)
+            else:
+                output.append(" ")
+        elif block_comment:
+            if character == "*" and following == "/":
+                output.extend((" ", " "))
+                index += 1
+                block_comment = False
+            else:
+                output.append(character if character in "\r\n" else " ")
+        elif in_string:
+            output.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+            output.append(character)
+        elif character == "/" and following == "/":
+            output.extend((" ", " "))
+            index += 1
+            line_comment = True
+        elif character == "/" and following == "*":
+            output.extend((" ", " "))
+            index += 1
+            block_comment = True
+        else:
+            output.append(character)
+        index += 1
+    if block_comment:
+        raise ValueError("unterminated block comment in config.jsonc")
+    return "".join(output)
+
+
+def parse_jsonc(text: str) -> dict[str, object]:
+    uncommented = _strip_jsonc_comments(text)
+    output = []
+    index = 0
+    in_string = escaped = False
+    while index < len(uncommented):
+        character = uncommented[index]
+        if in_string:
+            output.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+            output.append(character)
+        elif character == ",":
+            lookahead = index + 1
+            while lookahead < len(uncommented) and uncommented[lookahead].isspace():
+                lookahead += 1
+            if lookahead >= len(uncommented) or uncommented[lookahead] not in "}]":
+                output.append(character)
+        else:
+            output.append(character)
+        index += 1
+    value = json.loads("".join(output))
+    if not isinstance(value, dict):
+        raise ValueError("Colab Remote config must be a JSON object")
+    return value
+
+
+def render_jsonc(config: dict[str, object], documentation: dict[str, object]) -> str:
+    settings = documentation["settings"]
+    assert isinstance(settings, dict)
+    names = list(settings)
+    names.extend(sorted(name for name in config if name not in settings))
+    lines = [
+        "{",
+        "  // Colab Remote configuration. Comments and trailing commas are supported.",
+        "  // Never store passwords, OAuth codes, tokens, or other secrets here.",
+    ]
+    for position, name in enumerate(names):
+        details = settings.get(name)
+        if isinstance(details, dict):
+            allowed = details["allowed"]
+            allowed_text = (
+                ", ".join(json.dumps(item) for item in allowed)
+                if isinstance(allowed, list)
+                else str(allowed)
+            )
+            lines.extend(
+                [
+                    f"  // {details['description']}",
+                    f"  // Type: {details['type']}. Default: {json.dumps(details['default'])}.",
+                    f"  // Allowed: {allowed_text}.",
+                ]
+            )
+        else:
+            lines.append("  // Preserved additional setting not known by this version.")
+        encoded = json.dumps(config[name], indent=2).splitlines()
+        suffix = "," if position + 1 < len(names) else ""
+        lines.append(f"  {json.dumps(name)}: {encoded[0]}")
+        lines.extend(f"  {line}" for line in encoded[1:-1])
+        if len(encoded) > 1:
+            lines.append(f"  {encoded[-1]}{suffix}")
+        else:
+            lines[-1] += suffix
+        if suffix:
+            lines.append("")
+    return "\n".join([*lines, "}"]) + "\n"
 
 
 def lifetime_minutes(value: str) -> int:
@@ -98,9 +222,30 @@ def parser() -> argparse.ArgumentParser:
         default=[],
         metavar="PATH",
     )
-    result.add_argument(
-        "--disable-notifications", "-DisableNotifications", action="store_true"
+    notifications = result.add_mutually_exclusive_group()
+    notifications.add_argument(
+        "--notification-mode",
+        choices=("off", "failures_only", "all"),
+        dest="notification_mode",
+        help="desktop popup policy (off by default)",
     )
+    notifications.add_argument(
+        "--enable-notifications",
+        "-EnableNotifications",
+        dest="notification_mode",
+        action="store_const",
+        const="all",
+        help="enable all desktop completion popups",
+    )
+    notifications.add_argument(
+        "--disable-notifications",
+        "-DisableNotifications",
+        dest="notification_mode",
+        action="store_const",
+        const="off",
+        help=argparse.SUPPRESS,
+    )
+    result.set_defaults(notification_mode="off")
     result.add_argument("--enable-ssh", "-EnableSshTunnel", action="store_true")
     result.add_argument(
         "--skip-authentication", "-SkipAuthentication", action="store_true"
@@ -153,12 +298,14 @@ class Installer:
     def restore_existing_distro(self) -> None:
         """Keep using the WSL distribution selected by an earlier install."""
         explicit = set(getattr(self.options, "explicit_config_options", set()))
-        config_path = self.state_root / "config.json"
-        if not self.windows or "distro" in explicit or not config_path.is_file():
+        config_path = self.state_root / "config.jsonc"
+        legacy_path = self.state_root / "config.json"
+        source = config_path if config_path.is_file() else legacy_path
+        if not self.windows or "distro" in explicit or not source.is_file():
             return
         try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            config = parse_jsonc(source.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
             raise ValueError("existing Colab Remote config is not valid JSON") from exc
         if not isinstance(config, dict):
             raise ValueError("existing Colab Remote config must be a JSON object")
@@ -471,8 +618,44 @@ fi
             roots.append(str(path))
         return sorted(set(roots))
 
+    def configuration_documentation(self) -> dict[str, object]:
+        cached = getattr(self, "_configuration_documentation", None)
+        if cached is not None:
+            return cached
+        documentation_path = (
+            Path(__file__).resolve().parent
+            / "plugins"
+            / "colab-remote"
+            / "config_schema.json"
+        )
+        if documentation_path.is_file():
+            documentation = json.loads(
+                documentation_path.read_text(encoding="utf-8")
+            )
+        else:
+            url = (
+                f"https://raw.githubusercontent.com/{REPOSITORY}/main/"
+                "plugins/colab-remote/config_schema.json"
+            )
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "colab-remote-installer"}
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                documentation = json.loads(response.read().decode("utf-8"))
+        if not isinstance(documentation, dict) or not isinstance(
+            documentation.get("settings"), dict
+        ):
+            raise RuntimeError("Colab Remote configuration documentation is invalid")
+        self._configuration_documentation = documentation
+        return documentation
+
     def default_config(self) -> dict[str, object]:
-        return {
+        documentation = self.configuration_documentation()
+        defaults = {
+            name: details["default"]
+            for name, details in documentation["settings"].items()
+        }
+        defaults.update({
             "distro": self.options.distro,
             "default_accelerator": self.options.default_accelerator,
             "default_language": self.options.default_language,
@@ -481,22 +664,34 @@ fi
             "default_timeout_seconds": 3600,
             "compute_warning_minutes": 60,
             "default_max_lifetime_minutes": self.options.max_lifetime,
-            "notifications_enabled": not self.options.disable_notifications,
+            "notification_mode": self.options.notification_mode,
+            "max_concurrent_sessions": 8,
+            "transfer_compression": False,
+            "transfer_parallelism": 4,
+            "retry_attempts": 3,
+            "default_drive_checkpoint_folder": "checkpoints",
             "require_cost_acknowledgement": True,
             "allowed_local_roots": self.approved_roots(),
             "ssh_tunnel_enabled": self.options.enable_ssh,
-        }
+        })
+        return defaults
 
     def write_config(self) -> None:
         self.state_root.mkdir(parents=True, exist_ok=True)
-        destination = self.state_root / "config.json"
+        destination = self.state_root / "config.jsonc"
+        legacy_destination = self.state_root / "config.json"
         defaults = self.default_config()
         explicit = set(getattr(self.options, "explicit_config_options", set()))
-        if destination.exists():
+        source = destination if destination.exists() else legacy_destination
+        if source.exists():
             self.step("Preserving Colab Remote configuration")
-            loaded = json.loads(destination.read_text(encoding="utf-8"))
-            if not isinstance(loaded, dict):
-                raise ValueError("existing Colab Remote config must be a JSON object")
+            loaded = parse_jsonc(source.read_text(encoding="utf-8"))
+            if "notification_mode" not in loaded and "notifications_enabled" in loaded:
+                loaded["notification_mode"] = (
+                    "all" if loaded["notifications_enabled"] else "off"
+                )
+            loaded.pop("notifications_enabled", None)
+            loaded.pop("_documentation", None)
             config = {**defaults, **loaded}
             updates = {
                 "distro": "distro",
@@ -505,7 +700,7 @@ fi
                 "runtime_version": "default_runtime_version",
                 "high_ram": "default_high_ram",
                 "max_lifetime": "default_max_lifetime_minutes",
-                "disable_notifications": "notifications_enabled",
+                "notification_mode": "notification_mode",
                 "allowed_root": "allowed_local_roots",
                 "enable_ssh": "ssh_tunnel_enabled",
             }
@@ -516,8 +711,9 @@ fi
             self.step("Saving owner-only Colab Remote defaults")
             config = defaults
         config["require_cost_acknowledgement"] = True
+        documentation = self.configuration_documentation()
         temporary = destination.with_suffix(".tmp")
-        temporary.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        temporary.write_text(render_jsonc(config, documentation), encoding="utf-8")
         if self.windows:
             username = os.environ.get("USERNAME")
             domain = os.environ.get("USERDOMAIN")
@@ -537,6 +733,7 @@ fi
             self.state_root.chmod(0o700)
             temporary.chmod(0o600)
         temporary.replace(destination)
+        legacy_destination.unlink(missing_ok=True)
         if not self.windows:
             destination.chmod(0o600)
 
