@@ -27,6 +27,7 @@ from pydantic import Field
 import drive_ops
 import managed_transfer
 import notebook_ops
+import process_utils
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -1294,13 +1295,6 @@ def _start_monitor(
             and int(time.time()) - heartbeat < interval_seconds * 2 + 30
         ):
             return {"watching": True, "already_running": True, **existing}
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = (
-                getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                | getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            )
         metadata = {
             "session_name": session_name,
             "job_name": job_name,
@@ -1311,7 +1305,7 @@ def _start_monitor(
         }
         _save_monitor_record(session_name, job_name, metadata)
         try:
-            process = subprocess.Popen(
+            process = process_utils.background_popen(
                 [
                     sys.executable,
                     str(Path(__file__).resolve()),
@@ -1322,12 +1316,7 @@ def _start_monitor(
                     "1" if stop_session_on_finish else "0",
                     "1" if recover_on_runtime_loss else "0",
                 ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                creationflags=creationflags,
-                start_new_session=os.name != "nt",
+                windowless_python_entrypoint=True,
             )
         except Exception:
             _save_monitor_record(session_name, job_name, None)
@@ -1440,21 +1429,9 @@ def _start_session_lease(session_name: str) -> dict[str, Any]:
                 return {"enabled": True, "already_running": True, **existing}
         except (OSError, ValueError, TypeError):
             pass
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        )
-    process = subprocess.Popen(
+    process = process_utils.background_popen(
         [sys.executable, str(Path(__file__).resolve()), "--lease-session", session],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=creationflags,
-        start_new_session=os.name != "nt",
+        windowless_python_entrypoint=True,
     )
     metadata = {
         "enabled": True,
@@ -2590,21 +2567,8 @@ def _start_drive_mount_worker(session_name: str) -> dict[str, Any]:
     host_command = (
         ["wsl.exe", "-d", _distro(), "--", *command] if _uses_wsl() else command
     )
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        )
-    process = subprocess.Popen(
+    process = process_utils.background_popen(
         host_command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=creationflags,
-        start_new_session=os.name != "nt",
     )
     return {
         "event": "starting",

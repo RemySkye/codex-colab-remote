@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.5
+
+- Fixed Codex MCP registration by replacing an unsupported `${__dirname}` placeholder with plugin-relative paths and an explicit plugin working directory.
+- Made protocol tests execute the exact shipped `.mcp.json` launcher and added validation for unresolved placeholders, escaped paths, and missing manifest or marketplace targets.
+- Updated agent guidance to probe a harmless deferred MCP tool before incorrectly reporting that Colab tools are unregistered.
+- Prevented Windows Terminal popups from job monitors, session-lifetime timers, managed transfers, and the Drive mount launcher.
+- Replaced the conflicting `CREATE_NO_WINDOW | DETACHED_PROCESS` combination with one shared cross-platform background-process launcher.
+- Prefer `pythonw.exe` for Windows Python helpers, hide fallback processes explicitly, and keep all helper standard streams disconnected from MCP.
+- Added unit coverage for every background helper plus a real Windows test that verifies the spawned process has no console window.
+
 ## 0.6.4
 
 - Replaced the incomplete Drive authorization preflight with a persistent PTY worker that keeps Google's original `drivemount` process alive through user approval and VM credential propagation.

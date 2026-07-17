@@ -10,11 +10,12 @@ from pathlib import Path
 import re
 import shlex
 import shutil
-import subprocess
 import sys
 import tarfile
 import time
 from typing import Any
+
+import process_utils
 
 
 TRANSFER_ID = re.compile(r"[0-9a-f]{24}")
@@ -408,26 +409,14 @@ def spawn(api: Any, state: dict[str, Any]) -> dict[str, Any]:
     (directory(api, transfer_id) / "cancel.requested").unlink(missing_ok=True)
     state.update({"status": "starting", "updated_at": int(time.time())})
     save_state(api, state)
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        )
-    process = subprocess.Popen(
+    process = process_utils.background_popen(
         [
             sys.executable,
             str(Path(api.__file__).resolve()),
             "--run-transfer",
             transfer_id,
         ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=creationflags,
-        start_new_session=os.name != "nt",
+        windowless_python_entrypoint=True,
     )
     state["worker_pid"] = process.pid
     save_state(api, state)

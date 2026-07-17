@@ -1134,13 +1134,18 @@ class ServerTests(unittest.TestCase):
                 patch.object(server, "_uses_wsl", return_value=False),
                 patch.object(server, "_wsl_path", side_effect=lambda path: str(path)),
                 patch.object(server, "_wsl", return_value=completed()),
-                patch.object(server.subprocess, "Popen", return_value=process) as popen,
+                patch.object(
+                    server.process_utils, "background_popen", return_value=process
+                ) as popen,
             ):
                 result = server._start_drive_mount_worker("test-session")
         command = popen.call_args.args[0]
         self.assertIn("drive_mount_worker.py", " ".join(command))
         self.assertIn("/home/test/colab", command)
         self.assertNotIn("accounts.google.com", " ".join(command))
+        self.assertFalse(
+            popen.call_args.kwargs.get("windowless_python_entrypoint", False)
+        )
         self.assertEqual(result["launcher_pid"], 1234)
 
     def test_drive_delete_needs_confirmation_before_mounting(self):
@@ -1300,7 +1305,7 @@ class ServerTests(unittest.TestCase):
                     unsafe, root / "unsafe-output", False
                 )
 
-    def test_monitor_is_detached_and_rejects_missing_job(self):
+    def test_monitor_is_backgrounded_and_rejects_missing_job(self):
         with (
             patch.object(server, "_job_status_impl", return_value={"exists": False}),
             self.assertRaises(ValueError),
@@ -1312,12 +1317,51 @@ class ServerTests(unittest.TestCase):
             patch.object(server, "_job_status_impl", return_value={"exists": True}),
             patch.object(server, "_load_monitor_ledger", return_value={}),
             patch.object(server, "_save_monitor_record") as save,
-            patch.object(server.subprocess, "Popen", return_value=process),
+            patch.object(
+                server.process_utils, "background_popen", return_value=process
+            ) as popen,
         ):
-            result = server._start_monitor("test-session", "detached", 30)
+            result = server._start_monitor("test-session", "background", 30)
         self.assertEqual(result["watcher_pid"], 4321)
         self.assertFalse(result["already_running"])
+        self.assertTrue(popen.call_args.kwargs["windowless_python_entrypoint"])
         save.assert_called_once()
+
+    def test_session_lease_uses_windowless_background_python(self):
+        process = MagicMock(pid=9876)
+        with tempfile.TemporaryDirectory() as temporary:
+            lease_path = Path(temporary) / "lease.json"
+            with (
+                patch.object(
+                    server,
+                    "_load_session_ledger",
+                    return_value={"test-session": {"expires_at": 9999999999}},
+                ),
+                patch.object(server, "_lease_path", return_value=lease_path),
+                patch.object(server, "_save_lease_record") as save,
+                patch.object(
+                    server.process_utils, "background_popen", return_value=process
+                ) as popen,
+            ):
+                result = server._start_session_lease("test-session")
+        self.assertEqual(result["watcher_pid"], 9876)
+        self.assertTrue(popen.call_args.kwargs["windowless_python_entrypoint"])
+        save.assert_called_once()
+
+    def test_managed_transfer_uses_windowless_background_python(self):
+        process = MagicMock(pid=2468)
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(server, "TRANSFERS_ROOT", Path(temporary)),
+                patch.object(server, "_secure_state_root"),
+                patch.object(
+                    server.process_utils, "background_popen", return_value=process
+                ) as popen,
+            ):
+                state = {"transfer_id": "a" * 24}
+                result = server.managed_transfer.spawn(server, state)
+        self.assertEqual(result["worker_pid"], 2468)
+        self.assertTrue(popen.call_args.kwargs["windowless_python_entrypoint"])
 
     def test_monitor_records_use_collision_safe_files(self):
         with (

@@ -7,6 +7,8 @@ description: Provision and operate user-authorized Google Colab runtimes from Co
 
 Use the `colab-remote` MCP tools. Do not read tokens, handle authorization codes, or use Google Cloud ADC. Prefer the typed official-CLI tools, including `terminal_exec` for arbitrary Linux commands. Use optional SSH only when a concrete requirement needs the SSH network protocol.
 
+Codex may defer MCP tool definitions until a relevant tool is requested. Do not claim that Colab tools are unregistered merely because an abbreviated task tool list does not show them. First attempt the harmless `doctor`, `credential_status`, or `list_sessions` tool. Report a registration problem only if that MCP call is unavailable or the MCP server returns a startup error.
+
 ## Safe startup
 
 1. Call `doctor` and `credential_status`.

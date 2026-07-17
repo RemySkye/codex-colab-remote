@@ -22,9 +22,16 @@ class RepositoryTests(unittest.TestCase):
     def test_mcp_uses_portable_launcher(self):
         config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
         server = config["mcpServers"]["colab-remote"]
-        self.assertEqual(server["command"], "uv")
-        self.assertIn("--project", server["args"])
-        self.assertTrue(any("mcp/server.py" in value for value in server["args"]))
+        self.assertEqual(
+            server,
+            {
+                "command": "uv",
+                "args": ["run", "--project", ".", "python", "./mcp/server.py"],
+                "cwd": ".",
+            },
+        )
+        self.assertNotIn("${", json.dumps(server))
+        self.assertTrue((ROOT / "mcp" / "server.py").is_file())
 
     def test_no_legacy_auth_handoff_helpers(self):
         for relative in (
@@ -59,6 +66,14 @@ class RepositoryTests(unittest.TestCase):
         self.assertNotIn("install.julialang.org", runtime_sources)
         self.assertNotIn("Juliaup", runtime_sources)
 
+    def test_skill_probes_deferred_tools_before_reporting_registration_failure(self):
+        skill = (ROOT / "skills" / "operate-colab-remote" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("defer MCP tool definitions", skill)
+        self.assertIn("Do not claim that Colab tools are unregistered", skill)
+        self.assertIn("list_sessions", skill)
+
     def test_smoke_test_verifies_cleanup(self):
         installer = (REPOSITORY_ROOT / "install.py").read_text(encoding="utf-8")
         self.assertIn('self.colab_command(["stop", "-s", session])', installer)
@@ -75,6 +90,20 @@ class RepositoryTests(unittest.TestCase):
             item for item in marketplace["plugins"] if item["name"] == "colab-remote"
         )
         self.assertEqual(entry["source"]["path"], "./plugins/colab-remote")
+        self.assertEqual(
+            (REPOSITORY_ROOT / entry["source"]["path"]).resolve(), ROOT.resolve()
+        )
+
+    def test_manifest_companion_paths_resolve_inside_plugin(self):
+        manifest = json.loads(
+            (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        for field in ("skills", "mcpServers"):
+            reference = manifest[field]
+            self.assertTrue(reference.startswith("./"), reference)
+            target = (ROOT / reference).resolve()
+            self.assertTrue(target.is_relative_to(ROOT.resolve()), target)
+            self.assertTrue(target.exists(), target)
 
     def test_bootstrap_uses_safe_codex_install_and_update_commands(self):
         installer = (REPOSITORY_ROOT / "install.py").read_text(encoding="utf-8")

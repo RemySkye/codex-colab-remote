@@ -6,6 +6,8 @@ Start by asking Codex to call `doctor`, `credential_status`, and `list_sessions`
 
 Rerun the normal installer, then restart Codex or start a new task. The installer distinguishes Git and local marketplaces, repairs stale registrations, reinstalls the plugin, and verifies that Codex sees it. Do not run `marketplace upgrade` manually against a local marketplace; only Git marketplaces support that operation.
 
+If Codex can read the Colab skill but reports that tools such as `create_session` are unavailable, first confirm that `codex mcp list` shows `colab-remote` as enabled. Version 0.6.5 and newer use plugin-relative MCP paths and test the exact shipped launcher. After installing or updating, start a new task so Codex registers the server's tools.
+
 ## Authentication is missing or expired
 
 Rerun the OAuth command printed by `authentication_instructions`. Do not use `gcloud` ADC and do not paste the authorization code into Codex. On Windows the command runs inside WSL.
@@ -27,6 +29,10 @@ Call `transfer_status`, then `resume_transfer`. Cancel with confirmation if the 
 ## No desktop popup appears
 
 Call `test_notification` and inspect its reported backend. Windows notifications may be blocked by Focus Assist; macOS may require notification permission; Linux needs `notify-send` and a graphical notification service. `notification_history` works even without a popup backend.
+
+## Terminal windows appear while background work is running
+
+Update to version 0.6.5 or newer. Older Windows releases combined incompatible process-creation flags for job monitors, lifetime timers, managed transfers, and Drive mounting. Current releases use `pythonw.exe` when available and a shared no-window launcher. A popup whose command references an older cached plugin version came from a helper that was already running before the update; it ends with that helper, and newly started helpers use the corrected launcher.
 
 ## Runtime disappeared
 
