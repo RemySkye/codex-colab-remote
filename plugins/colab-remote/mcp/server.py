@@ -338,6 +338,21 @@ def _secure_state_root() -> None:
                 pass
 
 
+def _write_owner_only_text(path: Path, value: str) -> None:
+    """Create a private, exclusive file without a permissive-mode window."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(value)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        path.unlink(missing_ok=True)
+        raise
+
+
 def _config_integer(config: dict[str, Any], name: str, minimum: int, maximum: int) -> int:
     value = config[name]
     if isinstance(value, bool) or not isinstance(value, int):
@@ -974,12 +989,7 @@ def _remote_shell(
     remote_helper = f"/content/.codex-remote-shell-{nonce}.py"
     uploaded = False
     try:
-        with local_helper.open("x", encoding="utf-8", newline="\n") as stream:
-            stream.write(python)
-        try:
-            os.chmod(local_helper, 0o600)
-        except OSError:
-            pass
+        _write_owner_only_text(local_helper, python)
         _colab(
             ["upload", "-s", session, _wsl_path(local_helper), remote_helper],
             timeout=min(timeout + 30, 1800),
@@ -1043,11 +1053,10 @@ def _staged_secret_file(
         f"{name}\t{value.encode().hex()}\n"
         for name, value in sorted(environment.items())
     )
-    local_path.write_text(payload, encoding="utf-8")
-    try:
-        os.chmod(local_path, 0o600)
-    except OSError:
-        pass
+    # The official Colab CLI accepts uploads from a filesystem path. The file is
+    # created atomically as owner-only, has a random name inside an owner-only
+    # directory, and is removed in the finally block immediately after upload.
+    _write_owner_only_text(local_path, payload)
     uploaded = False
     try:
         _colab(
