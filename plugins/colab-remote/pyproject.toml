@@ -24,7 +24,7 @@ packages = ["colab_remote"]
 "config_schema.json" = "colab_remote/config_schema.json"
 
 [dependency-groups]
-dev = ["ruff==0.15.21"]
+dev = ["ruff==0.15.22"]
 
 [tool.uv]
 package = true
