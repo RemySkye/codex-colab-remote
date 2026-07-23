@@ -89,20 +89,20 @@ required = [
     ROOT / "scripts" / "runtime.ps1",
     ROOT / "scripts" / "run_mcp.ps1",
     ROOT / "skills" / "operate-colab-remote" / "SKILL.md",
-    ROOT / "assets" / "bootstrap_ssh.py.tmpl",
 ]
 for path in required:
     if not path.exists():
         fail(f"required file is missing: {path.relative_to(REPOSITORY_ROOT)}")
 
 for obsolete in (
+    ROOT / "assets" / "bootstrap_ssh.py.tmpl",
     ROOT / "assets" / "bootstrap_colab.py.tmpl",
     ROOT / "scripts" / "start_colab_auth.sh",
     ROOT / "scripts" / "submit_colab_auth.sh",
     ROOT / "scripts" / "finish_colab_auth.ps1",
 ):
     if obsolete.exists():
-        fail(f"obsolete credential/tunnel helper remains: {obsolete.relative_to(ROOT)}")
+        fail(f"obsolete helper remains: {obsolete.relative_to(ROOT)}")
 
 marketplace = json.loads(
     (REPOSITORY_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(
@@ -137,10 +137,6 @@ banned = {
     "/home/administrator": "hardcoded WSL user",
     "4/0A": "possible OAuth authorization code",
     "--auth adc": "ADC authentication",
-    "PasswordAuthentication yes": "password-based SSH authentication",
-    "StrictHostKeyChecking=no": "disabled SSH host-key verification",
-    "PermitRootLogin yes": "SSH root login",
-    "codex ALL=(ALL) NOPASSWD": "passwordless SSH sudo access",
 }
 secret_patterns = {
     r"AIza[0-9A-Za-z_-]{30,}": "Google API key",

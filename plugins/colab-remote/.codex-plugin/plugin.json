@@ -1,7 +1,7 @@
 {
   "name": "colab-remote",
-  "version": "0.6.7+codex.20260717082623",
-  "description": "Operate Colab compute, notebooks, resumable files, recoverable jobs, and optional SSH.",
+  "version": "0.7.0+codex.20260723184230",
+  "description": "Operate Colab compute, notebooks, resumable files, and recoverable jobs through the official CLI.",
   "author": {
     "name": "RemySkye",
     "url": "https://github.com/RemySkye"
@@ -21,8 +21,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Colab Remote",
-    "shortDescription": "Operate authorized Colab runtimes and SSH.",
-    "longDescription": "Typed OAuth2-only Colab tools for hardware, High-RAM, runtime versions, Python, R, Julia, notebooks, sandboxed Drive storage, resumable files, recoverable jobs, and optional short-lived key-only SSH.",
+    "shortDescription": "Operate authorized Colab runtimes.",
+    "longDescription": "Typed OAuth2-only Colab CLI tools for hardware, High-RAM, runtime versions, Python, R, Julia, notebooks, sandboxed Drive storage, resumable files, and recoverable jobs.",
     "developerName": "RemySkye",
     "category": "Developer Tools",
     "capabilities": [
@@ -30,13 +30,13 @@
       "Accelerator provisioning",
       "High-RAM and runtime versions",
       "Python, R, and Julia execution",
-      "Automatic Linux terminal without SSH",
+      "OS-keychain secret aliases",
+      "Linux terminal through the official Colab CLI",
       "Restricted files and execution",
       "Resumable parallel file and folder transfers",
       "Notebook editing and sandboxed Google Drive storage",
       "Session lifetime and automatic recovery",
-      "Progress, silent history, and opt-in notifications",
-      "Optional key-only SSH terminal"
+      "Progress, silent history, and opt-in notifications"
     ],
     "defaultPrompt": "Use $operate-colab-remote to run this safely on my authorized Google Colab runtime."
   },

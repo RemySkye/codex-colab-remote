@@ -13,6 +13,24 @@ Every parameter has a machine-readable description and range. Choice fields are 
 
 `create_session` uses `high_ram=true` or `false`. `set_config` uses `default_high_ram`. L4, G4, H100, v5e-1, and v6e-1 automatically override `false` because those accelerators require High-RAM; CPU, T4, and A100 keep the selected value. Creating or reallocating a runtime requires explicit cost acknowledgement.
 
+Every successful `create_session` result includes a validated raw `session_url` for the attached Colab webpage. It is copy-paste-only: show it exactly in a fenced code block and have the user paste the entire URL into the browser address bar. Do not make it a Markdown link or open it through browser automation because encoding its fragment opens a disconnected scratchpad. Do not click Colab's normal **Connect** button; report an attachment failure instead. Use the attached page when the user needs to add a Colab Secret or enable its Notebook access toggle. Secret values remain user-entered in Colab and are not returned by the tool. The official CLI cannot list or toggle Secrets directly.
+
+## Local secret broker
+
+- `prepare_local_secret`
+- `list_local_secrets`
+- `enable_local_secrets`, `disable_local_secrets`
+
+`prepare_local_secret` returns the cross-platform `colab-remote secrets add NAME` command for the user to run in their own trusted terminal. The value is entered twice through a masked prompt and stored in Windows Credential Manager, macOS Keychain, or a Linux Secret Service keyring. MCP arguments, responses, metadata, and session-grant files contain names only.
+
+Users can manage those values with `colab-remote secrets add`, `list`, and `remove`. The list command consults only the plugin-owned alias index. `enable_local_secrets` is automatic by default; `require_secret_enable_approval=true` changes it to require acknowledgement for each grant.
+
+Session creation follows `require_cost_acknowledgement`. It asks every time by default; users can grant standing authorization in configuration. Up to `max_concurrent_sessions` named runtimes can coexist, and every session-bound tool requires the intended `session_name`.
+
+`list_local_secrets` refreshes the configured alias names without returning values. `enable_local_secrets` exposes selected aliases as environment variables to `execute_code`, `execute_file`, `terminal_exec`, and `start_job`. `disable_local_secrets` removes future access and clears the native kernel environment when possible; already-running jobs retain their inherited environment until stopped.
+
+This broker is separate from Colab's website Secrets. The official CLI cannot import, list, or toggle those website entries. Code running in an enabled session can read its environment, so enable only the aliases the workload needs and disable them afterward. There is deliberately no MCP tool to read, set, replace, rename, or delete a value.
+
 ## Code and terminal
 
 - `prepare_language`, `execute_code`, `execute_file`, `terminal_exec`
@@ -48,10 +66,3 @@ Managed transfers support folders, compression, 1–8 parallel chunks, checksums
 `mount_google_drive` creates `MyDrive/codex-colab` when it is missing. If it returns `authorization_required=true`, approve Google in the opened browser and then call `complete_google_drive_mount`; the plugin keeps that same official CLI process alive so it can finish credential propagation. Every `drive_path` is relative to the protected folder; absolute paths, traversal, symlink escapes, and access to other mounted Drive folders are rejected. Deletion requires `confirm=true`. The save and restore tools copy complete files or folders directly between the Colab VM and Drive, without routing data through the local PC.
 
 Use fast `/content` storage for active training and periodically checkpoint important outputs into the returned Drive workspace. A save with no `drive_path` uses the configured checkpoint folder. The plugin does not force an autosave policy: Codex may configure framework checkpoint code when the user requests it. Drive mounting may require the user to complete an interactive Google authorization step in Colab. Never provide that authorization material to Codex.
-
-## Optional SSH
-
-- `ssh_requirements`, `enable_ssh`, `prepare_ssh_browser`, `register_ssh_manifest`
-- `ssh_status`, `ssh_exec`, `ssh_upload`, `ssh_download`, `disable_ssh`
-
-SSH requires separate acknowledgements and an ngrok token stored in Colab Secrets. Prefer `terminal_exec` and managed transfers unless the SSH/SCP protocol itself is necessary.

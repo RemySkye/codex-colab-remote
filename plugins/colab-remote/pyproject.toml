@@ -1,12 +1,30 @@
 [project]
 name = "codex-colab-remote"
-version = "0.6.7"
+version = "0.7.0"
 description = "Secure MCP tools for authorized Google Colab sessions"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.20,<2", "pydantic>=2.11,<3"]
+dependencies = [
+  "keyring>=25.6,<26",
+  "mcp>=1.20,<2",
+  "pydantic>=2.11,<3",
+  "SecretStorage>=3.3,<4; sys_platform == 'linux'",
+]
+
+[project.scripts]
+colab-remote = "colab_remote.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["colab_remote"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"config_schema.json" = "colab_remote/config_schema.json"
 
 [dependency-groups]
 dev = ["ruff==0.15.21"]
 
 [tool.uv]
-package = false
+package = true

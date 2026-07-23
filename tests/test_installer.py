@@ -78,7 +78,7 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             options = installer.parser().parse_args(
-                ["--state-root", str(state), "--high-ram", "--enable-ssh"]
+                ["--state-root", str(state), "--high-ram"]
             )
             subject = installer.Installer(options, platform="linux")
             subject.write_config()
@@ -86,7 +86,6 @@ class InstallerTests(unittest.TestCase):
             text = config_path.read_text(encoding="utf-8")
             config = installer.parse_jsonc(text)
             self.assertTrue(config["default_high_ram"])
-            self.assertTrue(config["ssh_tunnel_enabled"])
             self.assertIn("// Default native Colab kernel language.", text)
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
@@ -266,6 +265,8 @@ class InstallerTests(unittest.TestCase):
                 "allowed_local_roots": ["/keep/me"],
                 "custom_future_setting": "preserved",
                 "require_cost_acknowledgement": False,
+                "ssh_secret_name": "LEGACY",
+                "ssh_tunnel_enabled": True,
             }
             legacy_path.write_text(json.dumps(original), encoding="utf-8")
             options = installer.parser().parse_args(
@@ -281,6 +282,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(updated["allowed_local_roots"], ["/keep/me"])
         self.assertEqual(updated["custom_future_setting"], "preserved")
         self.assertTrue(updated["require_cost_acknowledgement"])
+        self.assertNotIn("ssh_secret_name", updated)
+        self.assertNotIn("ssh_tunnel_enabled", updated)
         self.assertFalse(legacy_path.exists())
         self.assertIn("// Preserved additional setting", updated_text)
 
@@ -318,12 +321,35 @@ class InstallerTests(unittest.TestCase):
         subject.install_uv = MagicMock(return_value=Path("/uv"))
         subject.install_colab_cli = MagicMock()
         subject.install_plugin = MagicMock()
+        subject.install_user_cli = MagicMock()
         subject.write_config = MagicMock()
         subject.authenticate = MagicMock()
         subject.smoke_test = MagicMock()
         subject.execute()
         subject.authenticate.assert_not_called()
         subject.install_plugin.assert_called_once_with()
+        subject.install_user_cli.assert_called_once_with(Path("/uv"))
+
+    def test_user_cli_install_refreshes_same_version_source_wheel(self):
+        options = installer.parser().parse_args([])
+        subject = installer.Installer(options, platform="linux")
+        subject.run = MagicMock(return_value=completed())
+        subject.installed_plugin_root = ROOT / "plugins" / "colab-remote"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            executable = home / ".local" / "bin" / "colab-remote"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("", encoding="utf-8")
+            with patch.object(installer.Path, "home", return_value=home):
+                subject.install_user_cli(Path("/uv"))
+        install_command = subject.run.call_args_list[0].args[0]
+        self.assertIn("--force", install_command)
+        self.assertIn("--refresh-package", install_command)
+        refresh_index = install_command.index("--refresh-package")
+        self.assertEqual(
+            install_command[refresh_index + 1],
+            "codex-colab-remote",
+        )
 
     def test_shared_installer_rejects_old_python(self):
         original = installer.sys.version_info

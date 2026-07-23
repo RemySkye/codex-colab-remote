@@ -14,6 +14,10 @@ Rerun the OAuth command printed by `authentication_instructions`. Do not use `gc
 
 The plugin automatically changes an existing Colab CLI token to owner-only mode when needed, so users should not normally need to run `chmod 600 ~/.config/colab-cli/token.json` manually.
 
+## Local secret storage is unavailable
+
+Windows uses Credential Manager and macOS uses Keychain. On Linux, install and unlock a Secret Service-compatible keyring such as GNOME Keyring or KWallet, then call `list_local_secrets` again. The plugin deliberately refuses plaintext fallback storage.
+
 ## A requested GPU/TPU or High-RAM mode is unavailable
 
 Capacity and eligible combinations change by plan and region. Retry later or choose a smaller accelerator. Check `session_status` for the measured runtime and memory rather than assuming the request was honored.
@@ -43,7 +47,3 @@ Colab can reclaim VMs. Check `recovery_status`. Automatic recovery works only wh
 Call `mount_google_drive`. If it opens Google approval and returns `authorization_required=true`, approve the page and ask Codex to call `complete_google_drive_mount`. Do not repeatedly start new mount attempts: the completion tool resumes the original official CLI process and lets it propagate credentials into the VM. Codex must never receive an authorization code or token. All plugin-managed files live under `MyDrive/codex-colab`; paths outside it are intentionally rejected.
 
 For training performance, read active datasets and checkpoints from `/content` and save periodic checkpoints to Drive. Avoid workloads that repeatedly open thousands of small files directly on the mounted Drive filesystem.
-
-## SSH does not connect
-
-Confirm SSH is enabled in configuration, the Colab Secret is named correctly and notebook access is allowed, the account can create ngrok TCP endpoints, and the session still exists. Do not weaken host-key checking. Normal terminal work does not require SSH.

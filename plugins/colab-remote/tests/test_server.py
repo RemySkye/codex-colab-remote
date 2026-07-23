@@ -210,6 +210,7 @@ class ServerTests(unittest.TestCase):
 
     def test_expected_tools_are_registered(self):
         names = {tool.name for tool in server.mcp._tool_manager.list_tools()}
+        self.assertFalse(any(name.startswith("ssh_") for name in names))
         self.assertEqual(
             names,
             {
@@ -224,12 +225,12 @@ class ServerTests(unittest.TestCase):
                 "delete_notebook_cell",
                 "delete_drive_path",
                 "doctor",
-                "disable_ssh",
+                "disable_local_secrets",
                 "download_file",
                 "edit_notebook_cell",
+                "enable_local_secrets",
                 "execute_code",
                 "execute_file",
-                "enable_ssh",
                 "export_session_notebook",
                 "get_config",
                 "get_logs",
@@ -239,6 +240,7 @@ class ServerTests(unittest.TestCase):
                 "job_status",
                 "list_files",
                 "list_drive_files",
+                "list_local_secrets",
                 "list_sessions",
                 "list_transfers",
                 "load_notebook_from_drive",
@@ -247,11 +249,10 @@ class ServerTests(unittest.TestCase):
                 "move_drive_path",
                 "notification_history",
                 "prepare_language",
-                "prepare_ssh_browser",
+                "prepare_local_secret",
                 "read_notebook",
                 "recover_session",
                 "recovery_status",
-                "register_ssh_manifest",
                 "restart_kernel",
                 "restore_from_drive",
                 "resume_transfer",
@@ -262,11 +263,6 @@ class ServerTests(unittest.TestCase):
                 "session_url",
                 "set_config",
                 "set_session_lifetime",
-                "ssh_download",
-                "ssh_exec",
-                "ssh_requirements",
-                "ssh_status",
-                "ssh_upload",
                 "start_download",
                 "start_job",
                 "start_upload",
@@ -279,6 +275,10 @@ class ServerTests(unittest.TestCase):
                 "watch_job",
             },
         )
+        readme = (SERVER_PATH.parents[3] / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"{len(names)} MCP tools", readme)
+        for name in names:
+            self.assertIn(f"`{name}`", readme)
 
     def test_redacts_oauth_material(self):
         text = 'code=4/example-secret access_token=ya29.secret "refresh_token":"refresh-me"'
@@ -355,7 +355,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(remote_shell.call_count, 2)
         sleep.assert_called_once_with(2)
 
-    def test_terminal_exec_uses_official_cli_without_ssh(self):
+    def test_terminal_exec_uses_official_cli(self):
         with (
             patch.object(
                 server, "_remote_shell", return_value=completed("linux-ok\n")
@@ -368,7 +368,6 @@ class ServerTests(unittest.TestCase):
                 "test-session", "uname -a", "/content", timeout_seconds=45
             )
         self.assertEqual(result["transport"], "official-colab-cli")
-        self.assertFalse(result["ssh_required"])
         self.assertEqual(result["stdout"], "linux-ok\n")
         self.assertIn("uname -a", remote_shell.call_args.args[1])
         self.assertEqual(remote_shell.call_args.kwargs["timeout"], 45)
@@ -474,198 +473,6 @@ class ServerTests(unittest.TestCase):
         self.assertIn("// Total attempts for retry-safe", rendered)
         self.assertEqual(server.config_io.loads(rendered)["retry_attempts"], 5)
 
-    def test_config_requires_confirmation_to_enable_ssh(self):
-        with (
-            tempfile.TemporaryDirectory() as temporary,
-            patch.object(server, "STATE_ROOT", Path(temporary) / "state"),
-            patch.object(
-                server, "CONFIG_PATH", Path(temporary) / "state" / "config.json"
-            ),
-            patch.object(
-                server,
-                "_secure_state_root",
-                lambda: (Path(temporary) / "state").mkdir(parents=True, exist_ok=True),
-            ),
-        ):
-            with self.assertRaises(PermissionError):
-                server.set_config(ssh_tunnel_enabled=True)
-            result = server.set_config(
-                ssh_tunnel_enabled=True, confirm_sensitive_change=True
-            )
-        self.assertTrue(result["ssh_tunnel_enabled"])
-
-    def test_ssh_requires_config_and_two_acknowledgements(self):
-        disabled = {**server.DEFAULT_CONFIG, "ssh_tunnel_enabled": False}
-        enabled = {**server.DEFAULT_CONFIG, "ssh_tunnel_enabled": True}
-        with (
-            patch.object(server, "_load_config", return_value=disabled),
-            self.assertRaises(PermissionError),
-        ):
-            server.enable_ssh("test-session", True, True)
-        with (
-            patch.object(server, "_load_config", return_value=enabled),
-            self.assertRaises(PermissionError),
-        ):
-            server.enable_ssh("test-session")
-        with (
-            patch.object(server, "_load_config", return_value=enabled),
-            self.assertRaises(PermissionError),
-        ):
-            server.enable_ssh("test-session", acknowledge_colab_policy=True)
-
-    def test_ssh_bootstrap_and_client_are_key_only_and_pinned(self):
-        template = (
-            SERVER_PATH.parents[1] / "assets" / "bootstrap_ssh.py.tmpl"
-        ).read_text(encoding="utf-8")
-        self.assertIn("PasswordAuthentication no", template)
-        self.assertIn("AuthenticationMethods publickey", template)
-        self.assertIn('["usermod", "-p", "*", "codex"]', template)
-        self.assertIn("PermitRootLogin no", template)
-        self.assertIn("AllowTcpForwarding no", template)
-        self.assertNotIn("NOPASSWD", template)
-        self.assertNotIn('"config", "add-authtoken"', template)
-        self.assertIn("json.dumps(token)", template)
-        state = {
-            "private_key": "key",
-            "port": 1234,
-            "known_hosts": "known",
-            "host": "example.test",
-        }
-        arguments = server._ssh_base(state)
-        self.assertIn("StrictHostKeyChecking=yes", arguments)
-        self.assertIn("BatchMode=yes", arguments)
-
-    def test_redacts_labeled_ngrok_tokens(self):
-        self.assertEqual(
-            server._redact("NGROK_AUTHTOKEN=not-a-real-token"),
-            "NGROK_AUTHTOKEN=[REDACTED]",
-        )
-        self.assertEqual(
-            server._redact("authtoken: secret-value"), "authtoken: [REDACTED]"
-        )
-
-    def test_disable_ssh_retains_retry_state_when_remote_revoke_fails(self):
-        with (
-            patch.object(
-                server, "_remote_shell", side_effect=RuntimeError("runtime unavailable")
-            ),
-            patch.object(server, "_delete_local_ssh_state") as delete_state,
-        ):
-            result = server.disable_ssh("test-session", confirm=True)
-        self.assertFalse(result["closed"])
-        self.assertTrue(result["retry_required"])
-        self.assertFalse(result["private_key_deleted"])
-        delete_state.assert_not_called()
-
-    def test_stop_session_deletes_retry_state_after_verified_vm_stop(self):
-        failed_cleanup = {
-            "closed": False,
-            "remote_revoked": False,
-            "private_key_deleted": False,
-            "retry_required": True,
-        }
-        with (
-            patch.object(
-                server,
-                "_cancel_drive_mount_worker",
-                return_value={"cancelled": True, "event": "cancelled"},
-            ) as cancel_drive,
-            patch.object(server, "_ssh_state_path") as state_path,
-            patch.object(server, "disable_ssh", return_value=failed_cleanup),
-            patch.object(server, "_colab", side_effect=[completed(), completed()]),
-            patch.object(server, "_delete_local_ssh_state") as delete_state,
-            patch.object(server, "_load_session_ledger", return_value={}),
-            patch.object(server, "_save_session_ledger"),
-        ):
-            state_path.return_value.exists.return_value = True
-            result = server.stop_session("test-session", confirm=True)
-        cancel_drive.assert_called_once_with("test-session")
-        delete_state.assert_called_once_with("test-session")
-        self.assertTrue(result["drive_mount_cleanup"]["cancelled"])
-        self.assertTrue(result["ssh_cleanup"]["closed"])
-        self.assertTrue(result["ssh_cleanup"]["terminated_by_session_stop"])
-
-    def test_enable_ssh_registers_verified_manifest(self):
-        host_key = "ssh-ed25519 " + server.base64.b64encode(b"0" * 32).decode()
-        manifest = {
-            "session_name": "test-session",
-            "nonce": "fixed-nonce",
-            "endpoint": "tcp://example.test:12345",
-            "host_key": host_key,
-            "host_fingerprint": "SHA256:test",
-            "runtime": {"actual_gpu": None},
-        }
-
-        def fake_run(arguments, **_kwargs):
-            if arguments[0] == "ssh-keygen":
-                key = Path(arguments[-1])
-                key.write_text("private", encoding="utf-8")
-                key.with_suffix(".pub").write_text(
-                    "ssh-ed25519 AAAA test", encoding="utf-8"
-                )
-                return completed()
-            return completed("CODEX_SSH_OK")
-
-        with (
-            tempfile.TemporaryDirectory() as temporary,
-            patch.object(server, "SSH_ROOT", Path(temporary) / "ssh"),
-            patch.object(
-                server,
-                "_load_config",
-                return_value={**server.DEFAULT_CONFIG, "ssh_tunnel_enabled": True},
-            ),
-            patch.object(server.shutil, "which", return_value="present"),
-            patch.object(server.secrets, "token_urlsafe", return_value="fixed-nonce"),
-            patch.object(
-                server,
-                "_colab",
-                return_value=completed(
-                    "CODEX_SSH_MANIFEST=" + server.json.dumps(manifest)
-                ),
-            ),
-            patch.object(server, "_run", side_effect=fake_run),
-            patch.object(server, "_secure_state_root"),
-        ):
-            result = server.enable_ssh("test-session", True, True)
-            state = server._load_ssh_state("test-session")
-        self.assertTrue(result["connected"])
-        self.assertEqual(state["host"], "example.test")
-        self.assertFalse(result["root_access"])
-
-    def test_prepare_ssh_browser_returns_attached_notebook_bootstrap(self):
-        def fake_run(arguments, **_kwargs):
-            key = Path(arguments[-1])
-            key.write_text("private", encoding="utf-8")
-            key.with_suffix(".pub").write_text(
-                "ssh-ed25519 AAAA test", encoding="utf-8"
-            )
-            return completed()
-
-        with (
-            tempfile.TemporaryDirectory() as temporary,
-            patch.object(server, "SSH_ROOT", Path(temporary) / "ssh"),
-            patch.object(
-                server,
-                "_load_config",
-                return_value={**server.DEFAULT_CONFIG, "ssh_tunnel_enabled": True},
-            ),
-            patch.object(server.shutil, "which", return_value="present"),
-            patch.object(server.secrets, "token_urlsafe", return_value="fixed-nonce"),
-            patch.object(
-                server,
-                "_colab",
-                return_value=completed("https://colab.example/notebook"),
-            ),
-            patch.object(server, "_run", side_effect=fake_run),
-            patch.object(server, "_secure_state_root"),
-        ):
-            result = server.prepare_ssh_browser("test-session", True, True)
-            state = server._load_ssh_state("test-session")
-        self.assertTrue(result["browser_bootstrap_required"])
-        self.assertIn("userdata.get", result["bootstrap_code"])
-        self.assertEqual(result["session_url"], "https://colab.example/notebook")
-        self.assertTrue(state["pending_browser_bootstrap"])
-
     def test_local_file_access_is_disabled_by_default(self):
         with (
             tempfile.TemporaryDirectory() as temporary,
@@ -737,7 +544,7 @@ class ServerTests(unittest.TestCase):
         ):
             server._enforce_session_limit(config)
 
-    def test_cost_acknowledgement_cannot_be_disabled_in_config_file(self):
+    def test_standing_allocation_authorization_is_loaded_from_config_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             config_path = state / "config.json"
@@ -749,7 +556,27 @@ class ServerTests(unittest.TestCase):
                 patch.object(server, "CONFIG_PATH", config_path),
                 patch.object(server, "_secure_state_root"),
             ):
-                self.assertTrue(server._load_config()["require_cost_acknowledgement"])
+                self.assertFalse(server._load_config()["require_cost_acknowledgement"])
+
+    def test_disabling_per_session_cost_approval_requires_confirmation(self):
+        with (
+            patch.object(server, "_load_config", return_value=dict(server.DEFAULT_CONFIG)),
+            patch.object(server, "_save_config"),
+        ):
+            with self.assertRaises(PermissionError):
+                server.set_config(require_cost_acknowledgement=False)
+
+    def test_disabling_per_session_cost_approval_with_confirmation(self):
+        with (
+            patch.object(server, "_load_config", return_value=dict(server.DEFAULT_CONFIG)),
+            patch.object(server, "_save_config") as save,
+        ):
+            result = server.set_config(
+                require_cost_acknowledgement=False,
+                confirm_sensitive_change=True,
+            )
+        self.assertFalse(result["require_cost_acknowledgement"])
+        save.assert_called_once()
 
     def test_create_requests_high_ram(self):
         with (
@@ -787,6 +614,163 @@ class ServerTests(unittest.TestCase):
             )
         self.assertTrue(result["high_ram_requested"])
         self.assertEqual(colab.call_args_list[0].kwargs["machine_shape"], "hm")
+
+    def test_standing_authorization_creates_without_per_session_acknowledgement(self):
+        config = {
+            **server.DEFAULT_CONFIG,
+            "require_cost_acknowledgement": False,
+        }
+        with (
+            patch.object(server, "_load_config", return_value=config),
+            patch.object(
+                server,
+                "_enforce_session_limit",
+                return_value={"active_sessions": 0, "max_concurrent_sessions": 8},
+            ),
+            patch.object(server, "_colab", return_value=completed("ok")),
+            patch.object(
+                server,
+                "_initialize_native_language",
+                return_value={
+                    "language": "python",
+                    "kernel": "python3",
+                    "native": True,
+                },
+            ),
+            patch.object(
+                server, "_memory_status", return_value={"bytes": 14, "gib": 13.0}
+            ),
+            patch.object(server, "_record_session"),
+            patch.object(
+                server, "_session_compute_metadata", return_value={"tracked": True}
+            ),
+        ):
+            result = server.create_session("automatic-session")
+        self.assertEqual(result["session_name"], "automatic-session")
+
+    def test_create_returns_trusted_attached_colab_url(self):
+        attached_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+            "https://colab.research.google.com/tun/m/test-endpoint"
+        )
+        with (
+            patch.object(
+                server,
+                "_load_config",
+                return_value=dict(server.DEFAULT_CONFIG),
+            ),
+            patch.object(
+                server,
+                "_enforce_session_limit",
+                return_value={"active_sessions": 0, "max_concurrent_sessions": 8},
+            ),
+            patch.object(server, "_colab", return_value=completed("ok")),
+            patch.object(
+                server,
+                "_initialize_native_language",
+                return_value={
+                    "language": "python",
+                    "kernel": "python3",
+                    "native": True,
+                },
+            ),
+            patch.object(
+                server,
+                "_memory_status",
+                return_value={"bytes": 14, "gib": 13.0},
+            ),
+            patch.object(server, "_record_session"),
+            patch.object(
+                server,
+                "_session_compute_metadata",
+                return_value={"tracked": True},
+            ),
+            patch.object(
+                server, "_created_session_url", return_value=attached_url
+            ) as session_url,
+        ):
+            result = server.create_session(
+                "test-session",
+                accelerator="cpu",
+                high_ram=False,
+                acknowledge_cost=True,
+            )
+
+        session_url.assert_called_once_with("test-session")
+        self.assertEqual(result["session_url"], attached_url)
+        self.assertEqual(result["session_url_presentation"], "copy_paste_only")
+        self.assertIn("fenced code block", result["session_url_instructions"])
+        self.assertIn("never as a Markdown link", result["session_url_instructions"])
+        self.assertIn("browser address bar", result["session_url_instructions"])
+        self.assertIn(
+            "Do not click Colab's normal Connect",
+            result["session_url_instructions"],
+        )
+        self.assertIn("Secrets sidebar", result["secrets_setup"])
+
+    def test_created_session_url_preserves_raw_attachment_fragment(self):
+        attached_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+            "https://colab.research.google.com/tun/m/test-endpoint"
+        )
+        with patch.object(server, "_colab", return_value=completed(attached_url)):
+            self.assertEqual(
+                server._created_session_url("test-session"),
+                attached_url,
+            )
+
+    def test_created_session_url_rejects_encoded_attachment_fragment(self):
+        encoded_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+            "https%3A%2F%2Fcolab.research.google.com%2Ftun%2Fm%2Ftest-endpoint"
+        )
+        with patch.object(server, "_colab", return_value=completed(encoded_url)):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "valid raw Colab attachment URL",
+            ):
+                server._created_session_url("test-session")
+
+    def test_created_session_url_rejects_mismatched_backend(self):
+        mismatched_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ffirst-endpoint#datalabBackendUrl="
+            "https://colab.research.google.com/tun/m/second-endpoint"
+        )
+        with patch.object(server, "_colab", return_value=completed(mismatched_url)):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "valid raw Colab attachment URL",
+            ):
+                server._created_session_url("test-session")
+
+    def test_created_session_url_rejects_untrusted_host(self):
+        with patch.object(
+            server,
+            "_colab",
+            return_value=completed("https://evil.example/notebooks/empty.ipynb"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "valid raw Colab attachment URL",
+            ):
+                server._created_session_url("test-session")
+
+    def test_session_url_returns_copy_paste_contract(self):
+        attached_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+            "https://colab.research.google.com/tun/m/test-endpoint"
+        )
+        with patch.object(server, "_created_session_url", return_value=attached_url):
+            result = server.session_url("test-session")
+
+        self.assertEqual(result["session_url"], attached_url)
+        self.assertEqual(result["session_url_presentation"], "copy_paste_only")
+        self.assertIn("fenced code block", result["session_url_instructions"])
 
     def test_high_ram_only_accelerators_override_false(self):
         self.assertEqual(
@@ -1206,7 +1190,6 @@ class ServerTests(unittest.TestCase):
         self.assertIn("CODEX_PROGRESS_FILE", captured["script"])
         self.assertIn("heartbeat", captured["script"])
         self.assertIn("exit_code", captured["script"])
-        self.assertNotIn("ngrok", captured["script"].lower())
 
     def test_job_completion_monitor_is_opt_in(self):
         with (

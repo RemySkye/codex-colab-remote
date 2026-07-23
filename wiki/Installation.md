@@ -1,10 +1,12 @@
 # Installation
 
+The local secret broker uses Windows Credential Manager, macOS Keychain, or an unlocked Linux Secret Service keyring.
+
 Python 3.11 or newer is required on every platform. Both launchers run the same cross-platform Python installer.
 
 ## Update
 
-Rerun the same installer command. It safely refreshes or reuses the correct marketplace, asks Codex to replace the plugin without a separate uninstall, verifies the result, and preserves existing Google authentication and configuration.
+Rerun the same installer command or run `colab-remote update`. Both download the installer from the latest `main` branch, refresh the Git marketplace, replace the plugin without a separate uninstall, verify the result, and preserve existing Google authentication and configuration.
 
 ## Windows
 

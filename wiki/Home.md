@@ -1,4 +1,4 @@
-# Colab Remote for Codex
+# Colab Remote for Codex 0.7.0
 
 Colab Remote lets Codex provision and operate authorized Google Colab runtimes on Windows, Linux, and macOS through Google's official Colab CLI.
 
@@ -9,4 +9,4 @@ Colab Remote lets Codex provision and operate authorized Google Colab runtimes o
 - [[Security]]
 - [[Roadmap]]
 
-Normal code, terminal, notebook, job, and file operations do not require SSH. Optional ngrok SSH is disabled by default.
+Code, terminal, notebook, job, and file operations use Google's official Colab CLI.

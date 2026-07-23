@@ -56,5 +56,11 @@ jobs:
           "$HOME/.local/bin/colab" version
       - name: Lint
         run: uv run --project plugins/colab-remote ruff check plugins/colab-remote install.py tests/test_installer.py
+      - name: Test packaged user command
+        run: |
+          uv run --project plugins/colab-remote colab-remote --help
+          uv run --project plugins/colab-remote colab-remote config --help
+          uv run --project plugins/colab-remote colab-remote config describe require_secret_enable_approval
+          uv build --project plugins/colab-remote --wheel
       - name: Unit and MCP protocol tests
         run: uv run --project plugins/colab-remote python -m unittest discover -s plugins/colab-remote/tests -v
