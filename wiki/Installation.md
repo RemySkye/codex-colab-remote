@@ -1,5 +1,7 @@
 # Installation
 
+The optional local secret broker uses Windows Credential Manager, macOS Keychain, or an unlocked Linux Secret Service keyring.
+
 Python 3.11 or newer is required on every platform. Both launchers run the same cross-platform Python installer.
 
 ## Update

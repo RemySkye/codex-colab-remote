@@ -14,6 +14,10 @@ Rerun the OAuth command printed by `authentication_instructions`. Do not use `gc
 
 The plugin automatically changes an existing Colab CLI token to owner-only mode when needed, so users should not normally need to run `chmod 600 ~/.config/colab-cli/token.json` manually.
 
+## Local secret storage is unavailable
+
+Windows uses Credential Manager and macOS uses Keychain. On Linux, install and unlock a Secret Service-compatible keyring such as GNOME Keyring or KWallet, then call `list_local_secrets` again. The plugin deliberately refuses plaintext fallback storage.
+
 ## A requested GPU/TPU or High-RAM mode is unavailable
 
 Capacity and eligible combinations change by plan and region. Retry later or choose a smaller accelerator. Check `session_status` for the measured runtime and memory rather than assuming the request was honored.

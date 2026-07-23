@@ -22,6 +22,7 @@ Local state lives in `~/.codex/colab-remote` by default. It contains configurati
 - Codex plugin and MCP support
 - Python 3.11 or newer for installation; Python 3.12 through `uv` for the MCP environment
 - `google-colab-cli==0.6.0`
+- `keyring` for Windows Credential Manager, macOS Keychain, and Linux Secret Service integration
 - `mcp>=1.20,<2`
 - WSL2/Ubuntu on Windows only
 - Optional: OpenSSH client and ngrok TCP service for true SSH

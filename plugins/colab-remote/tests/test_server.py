@@ -224,9 +224,11 @@ class ServerTests(unittest.TestCase):
                 "delete_notebook_cell",
                 "delete_drive_path",
                 "doctor",
+                "disable_local_secrets",
                 "disable_ssh",
                 "download_file",
                 "edit_notebook_cell",
+                "enable_local_secrets",
                 "execute_code",
                 "execute_file",
                 "enable_ssh",
@@ -239,6 +241,7 @@ class ServerTests(unittest.TestCase):
                 "job_status",
                 "list_files",
                 "list_drive_files",
+                "list_local_secrets",
                 "list_sessions",
                 "list_transfers",
                 "load_notebook_from_drive",
@@ -247,6 +250,7 @@ class ServerTests(unittest.TestCase):
                 "move_drive_path",
                 "notification_history",
                 "prepare_language",
+                "prepare_local_secret",
                 "prepare_ssh_browser",
                 "read_notebook",
                 "recover_session",
@@ -653,8 +657,12 @@ class ServerTests(unittest.TestCase):
             patch.object(server.secrets, "token_urlsafe", return_value="fixed-nonce"),
             patch.object(
                 server,
-                "_colab",
-                return_value=completed("https://colab.example/notebook"),
+                "_created_session_url",
+                return_value=(
+                    "https://colab.research.google.com/notebooks/empty.ipynb?"
+                    "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+                    "https://colab.research.google.com/tun/m/test-endpoint"
+                ),
             ),
             patch.object(server, "_run", side_effect=fake_run),
             patch.object(server, "_secure_state_root"),
@@ -663,7 +671,8 @@ class ServerTests(unittest.TestCase):
             state = server._load_ssh_state("test-session")
         self.assertTrue(result["browser_bootstrap_required"])
         self.assertIn("userdata.get", result["bootstrap_code"])
-        self.assertEqual(result["session_url"], "https://colab.example/notebook")
+        self.assertIn("datalabBackendUrl=https://", result["session_url"])
+        self.assertEqual(result["session_url_presentation"], "copy_paste_only")
         self.assertTrue(state["pending_browser_bootstrap"])
 
     def test_local_file_access_is_disabled_by_default(self):
@@ -787,6 +796,130 @@ class ServerTests(unittest.TestCase):
             )
         self.assertTrue(result["high_ram_requested"])
         self.assertEqual(colab.call_args_list[0].kwargs["machine_shape"], "hm")
+
+    def test_create_returns_trusted_attached_colab_url(self):
+        attached_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+            "https://colab.research.google.com/tun/m/test-endpoint"
+        )
+        with (
+            patch.object(
+                server,
+                "_load_config",
+                return_value=dict(server.DEFAULT_CONFIG),
+            ),
+            patch.object(
+                server,
+                "_enforce_session_limit",
+                return_value={"active_sessions": 0, "max_concurrent_sessions": 8},
+            ),
+            patch.object(server, "_colab", return_value=completed("ok")),
+            patch.object(
+                server,
+                "_initialize_native_language",
+                return_value={
+                    "language": "python",
+                    "kernel": "python3",
+                    "native": True,
+                },
+            ),
+            patch.object(
+                server,
+                "_memory_status",
+                return_value={"bytes": 14, "gib": 13.0},
+            ),
+            patch.object(server, "_record_session"),
+            patch.object(
+                server,
+                "_session_compute_metadata",
+                return_value={"tracked": True},
+            ),
+            patch.object(
+                server, "_created_session_url", return_value=attached_url
+            ) as session_url,
+        ):
+            result = server.create_session(
+                "test-session",
+                accelerator="cpu",
+                high_ram=False,
+                acknowledge_cost=True,
+            )
+
+        session_url.assert_called_once_with("test-session")
+        self.assertEqual(result["session_url"], attached_url)
+        self.assertEqual(result["session_url_presentation"], "copy_paste_only")
+        self.assertIn("fenced code block", result["session_url_instructions"])
+        self.assertIn("never as a Markdown link", result["session_url_instructions"])
+        self.assertIn("browser address bar", result["session_url_instructions"])
+        self.assertIn(
+            "Do not click Colab's normal Connect",
+            result["session_url_instructions"],
+        )
+        self.assertIn("Secrets sidebar", result["secrets_setup"])
+
+    def test_created_session_url_preserves_raw_attachment_fragment(self):
+        attached_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+            "https://colab.research.google.com/tun/m/test-endpoint"
+        )
+        with patch.object(server, "_colab", return_value=completed(attached_url)):
+            self.assertEqual(
+                server._created_session_url("test-session"),
+                attached_url,
+            )
+
+    def test_created_session_url_rejects_encoded_attachment_fragment(self):
+        encoded_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+            "https%3A%2F%2Fcolab.research.google.com%2Ftun%2Fm%2Ftest-endpoint"
+        )
+        with patch.object(server, "_colab", return_value=completed(encoded_url)):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "valid raw Colab attachment URL",
+            ):
+                server._created_session_url("test-session")
+
+    def test_created_session_url_rejects_mismatched_backend(self):
+        mismatched_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ffirst-endpoint#datalabBackendUrl="
+            "https://colab.research.google.com/tun/m/second-endpoint"
+        )
+        with patch.object(server, "_colab", return_value=completed(mismatched_url)):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "valid raw Colab attachment URL",
+            ):
+                server._created_session_url("test-session")
+
+    def test_created_session_url_rejects_untrusted_host(self):
+        with patch.object(
+            server,
+            "_colab",
+            return_value=completed("https://evil.example/notebooks/empty.ipynb"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "valid raw Colab attachment URL",
+            ):
+                server._created_session_url("test-session")
+
+    def test_session_url_returns_copy_paste_contract(self):
+        attached_url = (
+            "https://colab.research.google.com/notebooks/empty.ipynb?"
+            "dbu=%2Ftun%2Fm%2Ftest-endpoint#datalabBackendUrl="
+            "https://colab.research.google.com/tun/m/test-endpoint"
+        )
+        with patch.object(server, "_created_session_url", return_value=attached_url):
+            result = server.session_url("test-session")
+
+        self.assertEqual(result["session_url"], attached_url)
+        self.assertEqual(result["session_url_presentation"], "copy_paste_only")
+        self.assertIn("fenced code block", result["session_url_instructions"])
 
     def test_high_ram_only_accelerators_override_false(self):
         self.assertEqual(

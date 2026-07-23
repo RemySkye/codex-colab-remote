@@ -13,6 +13,20 @@ Every parameter has a machine-readable description and range. Choice fields are 
 
 `create_session` uses `high_ram=true` or `false`. `set_config` uses `default_high_ram`. L4, G4, H100, v5e-1, and v6e-1 automatically override `false` because those accelerators require High-RAM; CPU, T4, and A100 keep the selected value. Creating or reallocating a runtime requires explicit cost acknowledgement.
 
+Every successful `create_session` result includes a validated raw `session_url` for the attached Colab webpage. It is copy-paste-only: show it exactly in a fenced code block and have the user paste the entire URL into the browser address bar. Do not make it a Markdown link or open it through browser automation because encoding its fragment opens a disconnected scratchpad. Do not click Colab's normal **Connect** button; report an attachment failure instead. Use the attached page when the user needs to add a Colab Secret or enable its Notebook access toggle. Secret values remain user-entered in Colab and are not returned by the tool. The official CLI cannot list or toggle Secrets directly.
+
+## Local secret broker
+
+- `prepare_local_secret`
+- `list_local_secrets`
+- `enable_local_secrets`, `disable_local_secrets`
+
+`prepare_local_secret` returns a command the user runs in their own trusted terminal. The value is entered twice through a masked prompt and stored in Windows Credential Manager, macOS Keychain, or a Linux Secret Service keyring. MCP arguments, responses, metadata, and session-grant files contain names only.
+
+`list_local_secrets` refreshes the configured alias names without returning values. `enable_local_secrets` exposes selected aliases as environment variables to `execute_code`, `execute_file`, `terminal_exec`, `start_job`, and `ssh_exec`. `disable_local_secrets` removes future access and clears the native kernel environment when possible; already-running jobs retain their inherited environment until stopped.
+
+This broker is separate from Colab's website Secrets. The official CLI cannot import, list, or toggle those website entries. Code running in an enabled session can read its environment, so enable only the aliases the workload needs and disable them afterward. There is deliberately no MCP tool to read, set, replace, rename, or delete a value.
+
 ## Code and terminal
 
 - `prepare_language`, `execute_code`, `execute_file`, `terminal_exec`

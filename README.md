@@ -12,6 +12,8 @@ Windows, Ubuntu/Linux, and macOS are supported. The same Python MCP server runs 
 
 - CPU, T4, L4, G4, H100, A100, TPU v5e-1, and TPU v6e-1 runtimes
 - Native Python, R, and Julia kernels; High-RAM and runtime-version selection
+- Raw copy-paste Colab attachment URL in every new session for user-managed Secret access
+- Local OS-keychain secret aliases with masked setup and per-session enable/disable controls
 - Arbitrary Linux terminal commands without SSH or a public tunnel
 - Monitored jobs, progress, silent completion history, opt-in desktop notifications, session lifetimes, cleanup, and recovery
 - Resumable parallel file/folder transfers with compression, checksums, cancellation, and resume
@@ -99,6 +101,12 @@ Ask Codex naturally, for example:
 Codex checks authentication and configuration, explains the quota warning, and asks before allocating compute. Normal terminal work uses the official CLI and does not require ngrok. See [Configuration](docs/configuration.md) and [Tool reference](docs/tools.md).
 
 Google Drive tools create and use only `MyDrive/codex-colab`. Codex can save or restore general files and folders there, and training code can checkpoint to the workspace path returned by `mount_google_drive`. The plugin does not impose an autosave schedule; the user or training code controls when saves happen. Google may require a one-time interactive Drive authorization in Colab.
+
+## Local API keys
+
+Ask Codex to list local secret aliases. For a missing alias such as `HF_TOKEN`, Codex returns a command for you to run in your own terminal. That command uses masked input and stores the value in Windows Credential Manager, macOS Keychain, or Linux Secret Service. Afterward, Codex can refresh the names and enable only the aliases a Colab session needs.
+
+Values never enter MCP arguments or responses, and there are no MCP tools to read, replace, rename, or delete them. Enabled Colab code can still read its environment, so use this only with trusted workloads and disable aliases when the job is finished. This local broker does not import keys from Colab's website Secrets.
 
 ## Optional SSH
 

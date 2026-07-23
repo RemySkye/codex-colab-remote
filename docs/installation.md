@@ -15,6 +15,8 @@ They do not install system packages, change firewall rules, copy OAuth tokens, o
 
 Python 3.11 or newer is required on Windows, Linux, and macOS.
 
+The optional local secret broker uses Windows Credential Manager, macOS Keychain, or a Linux Secret Service keyring. Windows and macOS provide their stores by default. Linux desktop users should ensure their normal keyring service is installed and unlocked; the rest of Colab Remote continues to work if no secure keyring is available.
+
 ## Updating an existing installation
 
 Rerun the same installer command used for installation. No separate updater is required.

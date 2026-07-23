@@ -5,6 +5,14 @@ description: Provision and operate user-authorized Google Colab runtimes from Co
 
 # Operate Colab Remote
 
+## Local secrets
+
+When a workload needs an API key, call `list_local_secrets`. If its alias is missing, call `prepare_local_secret` and ask the user to run the returned command in their own trusted terminal; input is masked and must never be pasted into Codex or chat. Call `list_local_secrets` again after the user finishes, then `enable_local_secrets` with only the required aliases. The aliases become environment variables for kernel code, terminal commands, persistent jobs, approved local files, and optional SSH.
+
+Never ask for, accept, print, rename, edit, or delete a secret value. The MCP tools expose names only and have no value-management operation. Code in an enabled session can technically read its environment, so enable the minimum aliases and call `disable_local_secrets` after the workload. Disabling affects future commands and the native kernel; already-running jobs retain inherited variables until stopped.
+
+The local broker is separate from Colab website Secrets. The official CLI still cannot list or toggle website Secrets. Use the attached browser page only when the user specifically chooses native Colab Secret access.
+
 Use the `colab-remote` MCP tools. Do not read tokens, handle authorization codes, or use Google Cloud ADC. Prefer the typed official-CLI tools, including `terminal_exec` for arbitrary Linux commands. Use optional SSH only when a concrete requirement needs the SSH network protocol.
 
 Codex may defer MCP tool definitions until a relevant tool is requested. Do not claim that Colab tools are unregistered merely because an abbreviated task tool list does not show them. First attempt the harmless `doctor`, `credential_status`, or `list_sessions` tool. Report a registration problem only if that MCP call is unavailable or the MCP server returns a startup error.
@@ -17,6 +25,8 @@ Codex may defer MCP tool definitions until a relevant tool is requested. Do not 
 4. Explain the quota/compute warning and get explicit approval. Then call `create_session` with `acknowledge_cost=true`, `high_ram=true` or `false`, and the confirmed settings.
 
 Use only these accelerator values: `cpu`, `t4`, `l4`, `g4`, `h100`, `a100`, `v5e-1`, and `v6e-1`. Use only `python`, `r`, or `julia` for language. Availability depends on the user's plan and capacity. L4, G4, H100, v5e-1, and v6e-1 automatically force High-RAM even when `high_ram=false`; CPU, T4, and A100 preserve the requested High-RAM setting. Report measured memory from the result.
+
+`create_session` returns a raw, copy-paste-only `session_url` for the exact CLI-created runtime. Show it exactly inside a fenced code block and ask the user to copy the entire URL into the browser address bar. Never format it as a Markdown link or open it through browser automation: either can encode the `datalabBackendUrl` fragment and open a disconnected scratchpad. The user must not click Colab's normal **Connect** button; if the page remains disconnected, stop and report that attachment failed. When a workload needs a known Colab Secret such as `HF_TOKEN`, use the attached page and ask the user to add the secret or enable its Notebook access toggle in the Secrets sidebar. The user must enter the value only in Colab and then tell Codex it is ready. Never ask for, display, list, copy, rename, edit, or delete secret values. The official CLI cannot list Secrets or change their toggles.
 
 ## Execute work
 
@@ -39,7 +49,7 @@ Do not configure SSH merely to obtain shell access; use `terminal_exec`. Continu
 1. Call `ssh_requirements`. Explain that Google may terminate SSH on free managed runtimes without a positive compute-unit balance and that ngrok creates a public TCP endpoint.
 2. The user must add `NGROK_AUTHTOKEN` to Colab Secrets and enable notebook access. Never ask for or accept the token in Codex.
 3. Enable `ssh_tunnel_enabled` through `set_config(..., confirm_sensitive_change=true)` only after explicit user approval.
-4. Call `enable_ssh` with both acknowledgements. If Colab says Secrets are available only in the UI, call `prepare_ssh_browser` with both acknowledgements, open its `session_url`, run only its returned `bootstrap_code` in that notebook, and pass only the `CODEX_SSH_MANIFEST=` JSON to `register_ssh_manifest`. Use browser control when available; otherwise ask the user to run the cell. Never read the secret value.
+4. Call `enable_ssh` with both acknowledgements. If Colab says Secrets are available only in the UI, call `prepare_ssh_browser` with both acknowledgements. Show its raw `session_url` in a fenced code block and have the user copy it into the browser address bar; never make it a link or open it through browser automation. Run only its returned `bootstrap_code` in that attached notebook, and pass only the `CODEX_SSH_MANIFEST=` JSON to `register_ssh_manifest`. Never read the secret value.
 5. Use `ssh_status`, `ssh_exec`, `ssh_upload`, and `ssh_download`; `/content/codex-ssh` is the writable SSH workspace. SSH is unprivileged by design, so use typed official-CLI tools for privileged setup instead of weakening SSH.
 6. Call `disable_ssh(confirm=true)` when terminal access is no longer needed. `stop_session` also attempts SSH cleanup.
 

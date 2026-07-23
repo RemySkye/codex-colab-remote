@@ -1,6 +1,6 @@
 {
   "name": "colab-remote",
-  "version": "0.6.7+codex.20260717082623",
+  "version": "0.6.8+codex.20260723150523",
   "description": "Operate Colab compute, notebooks, resumable files, recoverable jobs, and optional SSH.",
   "author": {
     "name": "RemySkye",
@@ -30,6 +30,7 @@
       "Accelerator provisioning",
       "High-RAM and runtime versions",
       "Python, R, and Julia execution",
+      "OS-keychain secret aliases",
       "Automatic Linux terminal without SSH",
       "Restricted files and execution",
       "Resumable parallel file and folder transfers",

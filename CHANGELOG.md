@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.8
+
+- Added a validated raw Colab attachment URL directly to every successful `create_session` result for user-managed Secret setup and Notebook access approval. It is explicitly copy-paste-only because Markdown links and browser automation can encode the attachment fragment and open a disconnected scratchpad.
+- Documented that secret values stay in Colab and that the official CLI cannot list Secrets or change their toggles.
+- Added a cross-platform local secret broker backed by the operating-system credential manager. Users enter values through a masked terminal prompt while MCP sees only alias names and per-session grants.
+- Added name-only tools to refresh, enable, and disable aliases for kernel code, terminal commands, persistent jobs, local files, and optional SSH.
+- Added owner-only temporary-file injection and output redaction so values do not enter MCP arguments, process command lines, metadata, or normal returned output.
+
 ## 0.6.7
 
 - Automatically force High-RAM for L4, G4, H100, v5e-1, and v6e-1 allocations, even when a caller supplies `high_ram=false`.

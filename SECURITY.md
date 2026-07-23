@@ -6,6 +6,8 @@ Report vulnerabilities privately through this repository's GitHub Security Advis
 
 - The plugin forces Colab CLI OAuth2 and removes Google ADC environment variables.
 - MCP tools never read or return the cached OAuth token. They inspect only file presence and permissions.
+- Local API-key values are entered only through a masked terminal prompt and stored by the operating-system credential manager. MCP tools expose alias names and session grants only.
+- Secret values are staged through owner-only temporary files, never MCP arguments or command-line arguments, and exact raw/common-encoded values are redacted from returned output.
 - Authentication happens in the user's terminal; there is no code-handoff helper.
 - Local files are inaccessible unless their parent directory is explicitly allowlisted.
 - Drive tools are limited to `MyDrive/codex-colab`; they reject absolute/traversal paths, symlink escapes, and sources or destinations elsewhere in the Drive mount.
@@ -23,6 +25,8 @@ Codex and the Colab CLI run as your local OS user. Any process running as that s
 Remote commands intentionally have full control of the allocated Colab VM. Keep sensitive local directories out of `allowed_local_roots`, review untrusted code, and use a separate Google account for stronger isolation.
 
 Google's Drive mount is visible to code running on the Colab VM. The typed Drive tools enforce the `MyDrive/codex-colab` boundary, and the bundled agent guidance forbids inspecting its parent. This protects normal tool use and reduces accidental damage, but it is not a security boundary against malicious code with full VM control. Use a separate Google account when adversarial code must be isolated from personal Drive data.
+
+An enabled local secret is an environment variable available to the selected kernel or process. Arbitrary code in that execution context can read it, transform it to bypass output redaction, or transmit it over the network. The broker keeps values out of MCP configuration and ordinary responses; it is not a sandbox against untrusted code. Enable only the aliases required by a trusted workload and disable them afterward.
 
 Optional SSH creates a public ngrok TCP endpoint and trusts Google Colab and ngrok as service providers. The SSH user is intentionally not root; use typed Colab tools for privileged work. Anyone who obtains the local private key while the tunnel is active could access that runtime. The plugin cannot protect a key from a compromised local OS account.
 

@@ -19,7 +19,7 @@ import time
 import webbrowser
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -29,6 +29,7 @@ import config_io
 import managed_transfer
 import notebook_ops
 import process_utils
+import secret_broker
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +99,15 @@ JobName = Annotated[
         min_length=1,
         max_length=64,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+    ),
+]
+SecretName = Annotated[
+    str,
+    Field(
+        description="Configured local secret alias such as HF_TOKEN; values are never accepted.",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Z_][A-Z0-9_]{0,127}$",
     ),
 ]
 AcceleratorName = Annotated[
@@ -234,9 +244,14 @@ mcp = FastMCP(
         "Google authorization codes, token files, gcloud credentials, Application Default Credentials, or ngrok "
         "tokens. Start with doctor, credential_status, and get_config. Before create_session, explain its "
         "compute warning and obtain explicit user approval. Prefer execute_code for kernel code and terminal_exec "
-        "for Linux commands. Google Drive tools are restricted to MyDrive/codex-colab; never inspect or modify "
-        "other mounted Drive paths through code or terminal commands. Optional SSH must remain user-approved, "
-        "key-only, host-key-pinned, and short-lived."
+        "for Linux commands. For API keys, use list_local_secrets and enable only required aliases; if an alias "
+        "is missing, use prepare_local_secret and ask the user to run its masked-input command in their own "
+        "terminal. Never request or accept a secret value through MCP or chat, and disable aliases after use. "
+        "Google Drive tools are restricted to MyDrive/codex-colab; never inspect or modify "
+        "other mounted Drive paths through code or terminal commands. Present a returned session_url exactly "
+        "inside a fenced code block for the user to copy into the browser address bar; never make it a Markdown "
+        "link or open it with browser automation because encoding its fragment breaks runtime attachment. "
+        "Optional SSH must remain user-approved, key-only, host-key-pinned, and short-lived."
     ),
 )
 
@@ -244,12 +259,45 @@ _monitor_lock = threading.Lock()
 _monitors: dict[str, dict[str, Any]] = {}
 _cli_lock_guard = threading.Lock()
 _cli_thread_locks: dict[str, threading.Lock] = {}
+_secret_redaction_lock = threading.Lock()
+_secret_redaction_values: set[str] = set()
+_secret_redaction_checked_at = 0.0
+
+
+def _remember_secret_redactions(environment: dict[str, str]) -> None:
+    with _secret_redaction_lock:
+        _secret_redaction_values.update(
+            value for value in environment.values() if value
+        )
+
+
+def _known_secret_redactions() -> set[str]:
+    global _secret_redaction_checked_at
+    with _secret_redaction_lock:
+        now = time.monotonic()
+        if now - _secret_redaction_checked_at > 30:
+            try:
+                _secret_redaction_values.update(secret_broker.all_values(STATE_ROOT))
+            except Exception:
+                pass
+            _secret_redaction_checked_at = now
+        return set(_secret_redaction_values)
 
 
 def _redact(value: str) -> str:
     text = ANSI_ESCAPE.sub("", value)
     for pattern, replacement in SENSITIVE_PATTERNS:
         text = pattern.sub(replacement, text)
+    for secret_value in sorted(_known_secret_redactions(), key=len, reverse=True):
+        variants = {
+            secret_value,
+            quote(secret_value, safe=""),
+            base64.b64encode(secret_value.encode()).decode(),
+            base64.urlsafe_b64encode(secret_value.encode()).decode().rstrip("="),
+            secret_value.encode().hex(),
+        }
+        for variant in sorted((item for item in variants if item), key=len, reverse=True):
+            text = text.replace(variant, "[REDACTED_LOCAL_SECRET]")
     return text
 
 
@@ -964,6 +1012,47 @@ def _ssh_run(
     return _run(_ssh_base(state) + [remote], timeout=timeout)
 
 
+@contextmanager
+def _staged_ssh_secret_file(state: dict[str, Any], environment: dict[str, str]):
+    if not environment:
+        yield None
+        return
+    _secure_state_root()
+    nonce = secrets.token_hex(12)
+    local_path = STATE_ROOT / f"ssh-secret-environment-{nonce}.hex"
+    remote_path = f"/content/codex-ssh/.codex-secret-{nonce}.hex"
+    payload = "".join(
+        f"{name}\t{value.encode().hex()}\n"
+        for name, value in sorted(environment.items())
+    )
+    local_path.write_text(payload, encoding="utf-8")
+    try:
+        os.chmod(local_path, 0o600)
+    except OSError:
+        pass
+    uploaded = False
+    try:
+        _run(
+            _scp_base(state)
+            + [str(local_path), f"codex@{state['host']}:{remote_path}"],
+            timeout=180,
+        )
+        uploaded = True
+        _ssh_run(state, f"chmod 600 {shlex.quote(remote_path)}", timeout=60)
+        yield remote_path
+    finally:
+        local_path.unlink(missing_ok=True)
+        if uploaded:
+            try:
+                _ssh_run(
+                    state,
+                    f"rm -f {shlex.quote(remote_path)}",
+                    timeout=60,
+                )
+            except Exception:
+                pass
+
+
 def _render_ssh_bootstrap(
     session_name: str,
     nonce: str,
@@ -1089,6 +1178,184 @@ def _remote_shell(
         )
         raise RuntimeError(detail)
     return result
+
+
+def _secret_environment(session_name: str) -> dict[str, str]:
+    environment = secret_broker.enabled_environment(STATE_ROOT, session_name)
+    _remember_secret_redactions(environment)
+    return environment
+
+
+@contextmanager
+def _staged_secret_file(
+    session_name: str, environment: dict[str, str]
+):
+    if not environment:
+        yield None
+        return
+    session = _validate_session_name(session_name)
+    _secure_state_root()
+    nonce = secrets.token_hex(12)
+    local_path = STATE_ROOT / f"secret-environment-{nonce}.hex"
+    remote_path = f"/content/.codex-secret-{nonce}.hex"
+    payload = "".join(
+        f"{name}\t{value.encode().hex()}\n"
+        for name, value in sorted(environment.items())
+    )
+    local_path.write_text(payload, encoding="utf-8")
+    try:
+        os.chmod(local_path, 0o600)
+    except OSError:
+        pass
+    uploaded = False
+    try:
+        _colab(
+            ["upload", "-s", session, _wsl_path(local_path), remote_path],
+            timeout=180,
+        )
+        uploaded = True
+        _remote_shell(
+            session,
+            f"chmod 600 {shlex.quote(remote_path)}",
+            timeout=60,
+        )
+        yield remote_path
+    finally:
+        local_path.unlink(missing_ok=True)
+        if uploaded:
+            _colab(
+                ["rm", "-s", session, remote_path],
+                timeout=60,
+                check=False,
+            )
+
+
+def _bash_secret_prelude(remote_path: str | None) -> str:
+    if remote_path is None:
+        return ""
+    path = shlex.quote(remote_path)
+    return (
+        f"_codex_secret_file={path}\n"
+        "_codex_secret_env=\"${_codex_secret_file}.sh\"\n"
+        "python3 - \"$_codex_secret_file\" \"$_codex_secret_env\" <<'PY'\n"
+        "import os,shlex,sys\n"
+        "source,target=sys.argv[1:]\n"
+        "fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+        "with open(source,encoding='utf-8') as stream,os.fdopen(fd,'w',encoding='utf-8') as out:\n"
+        "    for line in stream:\n"
+        "        name,encoded=line.rstrip('\\n').split('\\t',1)\n"
+        "        out.write('export '+name+'='+shlex.quote(bytes.fromhex(encoded).decode())+'\\n')\n"
+        "PY\n"
+        "source \"$_codex_secret_env\"\n"
+        "rm -f \"$_codex_secret_file\" \"$_codex_secret_env\"\n"
+        "unset _codex_secret_file _codex_secret_env\n"
+    )
+
+
+def _kernel_secret_prelude(language: str, remote_path: str | None) -> str:
+    if remote_path is None:
+        return ""
+    path = repr(remote_path)
+    if language == "python":
+        return (
+            "import os as _codex_os\n"
+            f"_codex_secret_path={path}\n"
+            "with open(_codex_secret_path,encoding='utf-8') as _codex_stream:\n"
+            "    for _codex_line in _codex_stream:\n"
+            "        _codex_name,_codex_hex=_codex_line.rstrip('\\n').split('\\t',1)\n"
+            "        _codex_os.environ[_codex_name]=bytes.fromhex(_codex_hex).decode()\n"
+            "_codex_os.unlink(_codex_secret_path)\n"
+            "del _codex_secret_path,_codex_stream,_codex_line,_codex_name,_codex_hex\n"
+        )
+    if language == "r":
+        return (
+            f".codex_secret_path <- {json.dumps(remote_path)}\n"
+            ".codex_secret_lines <- readLines(.codex_secret_path, warn=FALSE)\n"
+            "for (.codex_secret_line in .codex_secret_lines) {\n"
+            "  .codex_secret_parts <- strsplit(.codex_secret_line, '\\t', fixed=TRUE)[[1]]\n"
+            "  .codex_secret_hex <- .codex_secret_parts[[2]]\n"
+            "  .codex_secret_pos <- seq.int(1L, nchar(.codex_secret_hex), by=2L)\n"
+            "  .codex_secret_raw <- as.raw(strtoi(substring(.codex_secret_hex, "
+            ".codex_secret_pos, .codex_secret_pos + 1L), 16L))\n"
+            "  do.call(Sys.setenv, setNames(list(rawToChar(.codex_secret_raw)), "
+            ".codex_secret_parts[[1]]))\n"
+            "}\n"
+            "unlink(.codex_secret_path)\n"
+            "rm(.codex_secret_path,.codex_secret_lines,.codex_secret_line,"
+            ".codex_secret_parts,.codex_secret_hex,.codex_secret_pos,.codex_secret_raw)\n"
+        )
+    return (
+        f"_codex_secret_path = {json.dumps(remote_path)}\n"
+        "for _codex_secret_line in eachline(_codex_secret_path)\n"
+        "    _codex_secret_name, _codex_secret_hex = split(_codex_secret_line, '\\t'; limit=2)\n"
+        "    ENV[_codex_secret_name] = String(hex2bytes(_codex_secret_hex))\n"
+        "end\n"
+        "rm(_codex_secret_path; force=true)\n"
+    )
+
+
+def _inject_enabled_secrets_into_kernel(
+    session_name: str, language: str
+) -> list[str]:
+    environment = _secret_environment(session_name)
+    if not environment:
+        return []
+    with _staged_secret_file(session_name, environment) as remote_path:
+        result = _colab(
+            ["exec", "-s", session_name, "--timeout", "120"],
+            input_text=_kernel_secret_prelude(language, remote_path),
+            timeout=150,
+            runtime_language=language,
+        )
+    if result.returncode != 0:
+        raise RuntimeError(_redact(result.stderr or result.stdout))
+    return sorted(environment)
+
+
+def _clear_kernel_secret_names(
+    session_name: str, language: str, names: list[str]
+) -> None:
+    if not names:
+        return
+    if language == "python":
+        code = (
+            "import os as _codex_os\n"
+            f"for _codex_name in {names!r}: _codex_os.environ.pop(_codex_name,None)\n"
+            "del _codex_name\n"
+        )
+    elif language == "r":
+        r_names = "c(" + ",".join(json.dumps(name) for name in names) + ")"
+        code = f"Sys.unsetenv({r_names})\n"
+    else:
+        code = (
+            f"for _codex_name in {json.dumps(names)}\n"
+            "    pop!(ENV, _codex_name, nothing)\n"
+            "end\n"
+        )
+    _colab(
+        ["exec", "-s", session_name, "--timeout", "120"],
+        input_text=code,
+        timeout=150,
+        runtime_language=language,
+    )
+
+
+def _session_language(session_name: str) -> str:
+    record = _load_session_ledger().get(session_name, {})
+    language = str(record.get("language") or _load_config()["default_language"]).lower()
+    return language if language in LANGUAGES else "python"
+
+
+def _secret_manager_command(secret_name: str) -> str:
+    arguments = [
+        sys.executable,
+        str(Path(secret_broker.__file__).resolve()),
+        "--state-root",
+        str(STATE_ROOT.resolve()),
+        "set",
+        secret_name,
+    ]
+    return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
 
 
 def _memory_status(session_name: str) -> dict[str, Any]:
@@ -1833,6 +2100,139 @@ def credential_status(
 
 
 @mcp.tool()
+def prepare_local_secret(secret_name: SecretName) -> dict[str, Any]:
+    """Return a trusted-terminal command that stores one value with masked input; values never pass through MCP."""
+    name = secret_broker.validate_name(secret_name)
+    return {
+        "secret_name": name,
+        "command": _secret_manager_command(name),
+        "must_be_run_by_user": True,
+        "input_is_masked": True,
+        "value_enters_mcp": False,
+        "next_step": (
+            "Run this command yourself in a trusted local terminal, enter the value twice, "
+            "then ask Codex to call list_local_secrets again."
+        ),
+    }
+
+
+@mcp.tool()
+def list_local_secrets(
+    session_name: Annotated[
+        str | None,
+        Field(
+            description="Optional Colab session name for including its enabled aliases."
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """List local secret aliases and optional session grants; values are never returned."""
+    names = secret_broker.list_names(STATE_ROOT)
+    available: list[str] = []
+    unavailable: list[str] = []
+    for name in names:
+        try:
+            value = secret_broker.get_secret(STATE_ROOT, name)
+            _remember_secret_redactions({name: value})
+            available.append(name)
+        except secret_broker.SecretBrokerError:
+            unavailable.append(name)
+    session = _validate_session_name(session_name) if session_name is not None else None
+    return {
+        "configured_names": names,
+        "available_names": available,
+        "unavailable_names": unavailable,
+        "session_name": session,
+        "enabled_names": (
+            secret_broker.enabled_names(STATE_ROOT, session) if session is not None else []
+        ),
+        "values_exposed": False,
+        "refresh": "Call list_local_secrets again after the user stores a new alias.",
+    }
+
+
+@mcp.tool()
+def enable_local_secrets(
+    session_name: SessionName,
+    secret_names: Annotated[
+        list[SecretName],
+        Field(
+            description="One or more configured aliases to expose as environment variables in this session.",
+            min_length=1,
+        ),
+    ],
+) -> dict[str, Any]:
+    """Enable named local secrets for a session and inject them into its native kernel without returning values."""
+    session = _validate_session_name(session_name)
+    previous = set(secret_broker.enabled_names(STATE_ROOT, session))
+    enabled = secret_broker.enable_names(STATE_ROOT, session, list(secret_names))
+    language = _session_language(session)
+    try:
+        injected = _inject_enabled_secrets_into_kernel(session, language)
+    except Exception:
+        newly_added = sorted(set(enabled) - previous)
+        if newly_added:
+            secret_broker.disable_names(STATE_ROOT, session, newly_added)
+        raise
+    return {
+        "session_name": session,
+        "enabled_names": enabled,
+        "injected_names": injected,
+        "language": language,
+        "values_exposed": False,
+        "applies_to": [
+            "execute_code",
+            "execute_file",
+            "terminal_exec",
+            "start_job",
+            "ssh_exec",
+        ],
+        "security_note": (
+            "Code running with an enabled environment variable can read it. "
+            "Enable only aliases required by the workload."
+        ),
+    }
+
+
+@mcp.tool()
+def disable_local_secrets(
+    session_name: SessionName,
+    secret_names: Annotated[
+        list[SecretName] | None,
+        Field(
+            description="Aliases to disable, or null to disable every local secret for this session."
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Disable selected or all local secret aliases without changing their keychain values."""
+    session = _validate_session_name(session_name)
+    removed, remaining = secret_broker.disable_names(
+        STATE_ROOT, session, None if secret_names is None else list(secret_names)
+    )
+    language = _session_language(session)
+    kernel_cleared = True
+    clear_error = ""
+    if removed:
+        try:
+            _clear_kernel_secret_names(session, language, removed)
+        except Exception as exc:
+            kernel_cleared = False
+            clear_error = _redact(str(exc))
+    return {
+        "session_name": session,
+        "disabled_names": removed,
+        "enabled_names": remaining,
+        "kernel_environment_cleared": kernel_cleared,
+        "clear_error": clear_error,
+        "values_exposed": False,
+        "warning": (
+            "Already-running jobs retain their inherited environment until they finish or are stopped."
+            if removed
+            else ""
+        ),
+    }
+
+
+@mcp.tool()
 def doctor() -> dict[str, Any]:
     """Diagnose host transport, Colab CLI, OAuth, config, and notifications."""
     checks: dict[str, Any] = {"config": _load_config()}
@@ -1919,6 +2319,38 @@ def _enforce_session_limit(config: dict[str, Any]) -> dict[str, int]:
             f"Active Colab session limit reached ({active}/{maximum}). Stop a session or increase max_concurrent_sessions."
         )
     return {"active_sessions": active, "max_concurrent_sessions": maximum}
+
+
+def _created_session_url(session_name: str) -> str:
+    result = _colab(["url", "-s", session_name], timeout=30)
+    if result.returncode != 0:
+        detail = _redact(result.stderr.strip() or result.stdout.strip())
+        raise RuntimeError(f"Could not get the Colab session URL: {detail}")
+    for candidate in re.findall(r"https://[^\s\"'<>]+", result.stdout):
+        parsed = urlparse(candidate)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        backend_path = query.get("dbu", [None])[0]
+        fragment_prefix = "datalabBackendUrl="
+        fragment_url = (
+            parsed.fragment.removeprefix(fragment_prefix)
+            if parsed.fragment.startswith(fragment_prefix)
+            else ""
+        )
+        fragment_backend = urlparse(fragment_url)
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname == "colab.research.google.com"
+            and parsed.path.startswith("/notebooks/")
+            and backend_path is not None
+            and backend_path.startswith("/tun/m/")
+            and fragment_backend.scheme == "https"
+            and fragment_backend.hostname == "colab.research.google.com"
+            and fragment_backend.path == backend_path
+        ):
+            return candidate
+    raise RuntimeError(
+        "The official Colab CLI did not return a valid raw Colab attachment URL"
+    )
 
 
 @mcp.tool()
@@ -2039,6 +2471,14 @@ def create_session(
             "exact_cost_available": False,
             "error": _redact(str(exc)),
         }
+    try:
+        browser_url = _created_session_url(session)
+    except Exception as exc:
+        browser_url = None
+        warnings.append(
+            "Session was created, but its Colab webpage link could not be retrieved. "
+            f"Use session_url to retry: {_redact(str(exc))}"
+        )
     lease = (
         _start_session_lease(session) if selected_max_lifetime else {"enabled": False}
     )
@@ -2057,6 +2497,20 @@ def create_session(
         "lease": lease,
         "memory": memory,
         "compute": compute,
+        "session_url": browser_url,
+        "session_url_presentation": "copy_paste_only",
+        "session_url_instructions": (
+            "Show session_url exactly inside a fenced code block, never as a Markdown link. "
+            "Ask the user to copy the entire raw URL into the browser address bar. Do not open "
+            "it through browser automation, which may encode the attachment fragment. Do not "
+            "click Colab's normal Connect button; if the page remains disconnected, stop and "
+            "report that the attachment failed."
+        ),
+        "secrets_setup": (
+            "Copy session_url from its fenced code block into the browser address bar, use "
+            "Colab's Secrets sidebar to add or enable a required secret, enter its value only "
+            "in Colab, and then tell Codex it is ready."
+        ),
         "create_output": _output(result),
         "status": status,
         "warnings": warnings,
@@ -2189,14 +2643,15 @@ def execute_code(
     timeout = max(1, min(timeout_seconds or config["default_timeout_seconds"], 86400))
     if selected not in LANGUAGES:
         raise ValueError(f"language must be one of {sorted(LANGUAGES)}")
-    return _output(
-        _colab(
+    environment = _secret_environment(session)
+    with _staged_secret_file(session, environment) as remote_path:
+        result = _colab(
             ["exec", "-s", session, "--timeout", str(timeout)],
-            input_text=code,
+            input_text=_kernel_secret_prelude(selected, remote_path) + code,
             timeout=timeout + 30,
             runtime_language=selected,
         )
-    )
+    return _output(result)
 
 
 @mcp.tool()
@@ -2220,13 +2675,21 @@ def terminal_exec(
             86400,
         ),
     )
-    script = f"set -o pipefail; cd {shlex.quote(remote_workdir)}; {command}"
+    environment = _secret_environment(session)
+    with _staged_secret_file(session, environment) as remote_path:
+        script = (
+            "set -o pipefail\n"
+            + _bash_secret_prelude(remote_path)
+            + f"cd {shlex.quote(remote_workdir)}\n{command}"
+        )
+        result = _remote_shell(session, script, timeout=timeout)
     return {
         "session_name": session,
         "workdir": remote_workdir,
         "transport": "official-colab-cli",
         "ssh_required": False,
-        **_output(_remote_shell(session, script, timeout=timeout)),
+        "enabled_secret_names": sorted(environment),
+        **_output(result),
     }
 
 
@@ -2261,11 +2724,13 @@ def execute_file(
     timeout = max(
         1, min(timeout_seconds or _load_config()["default_timeout_seconds"], 86400)
     )
+    session = _validate_session_name(session_name)
+    _inject_enabled_secrets_into_kernel(session, selected)
     result = _colab(
         [
             "exec",
             "-s",
-            _validate_session_name(session_name),
+            session,
             "-f",
             _wsl_path(source),
             "--timeout",
@@ -3641,10 +4106,20 @@ def get_logs(session_name: SessionName, lines: LineCount = 200) -> dict[str, Any
 
 @mcp.tool()
 def session_url(session_name: SessionName) -> dict[str, Any]:
-    """Return the browser URL for a running session."""
-    return _output(
-        _colab(["url", "-s", _validate_session_name(session_name)], timeout=30)
-    )
+    """Return the raw copy-paste-only attachment URL for a running session.
+
+    Present the URL exactly in a fenced code block. Never turn it into a Markdown
+    link or open it through browser automation because URL encoding can break the
+    Colab runtime attachment fragment.
+    """
+    return {
+        "session_url": _created_session_url(_validate_session_name(session_name)),
+        "session_url_presentation": "copy_paste_only",
+        "session_url_instructions": (
+            "Show session_url exactly inside a fenced code block, never as a Markdown link. "
+            "Ask the user to copy the entire raw URL into the browser address bar."
+        ),
+    }
 
 
 @mcp.tool()
@@ -3707,22 +4182,47 @@ def start_job(
     job = _validate_job_name(job_name)
     remote_workdir = _validate_remote_workdir(workdir)
     encoded = base64.b64encode(command.encode()).decode()
-    script = f"""set -euo pipefail
+    environment = _secret_environment(session)
+    with _staged_secret_file(session, environment) as remote_secret_path:
+        secret_copy = (
+            f"cp {shlex.quote(remote_secret_path)} \"$d/secrets.hex\"; "
+            "chmod 600 \"$d/secrets.hex\""
+            if remote_secret_path is not None
+            else "rm -f \"$d/secrets.hex\""
+        )
+        script = f"""set -euo pipefail
 d=/content/.codex-remote/jobs/{job}; mkdir -p "$d"
 tmux has-session -t codex-{job} 2>/dev/null && {{ echo "job already running" >&2; exit 17; }}
+{secret_copy}
 printf %s {encoded} | base64 -d > "$d/command.sh"; chmod 700 "$d/command.sh"
 cat > "$d/wrapper.sh" <<'WRAP'
 #!/usr/bin/env bash
 set +e
 d="$1"; workdir="$2"; export CODEX_PROGRESS_FILE="$d/progress.json"
+if test -f "$d/secrets.hex"; then
+  python3 - "$d/secrets.hex" "$d/secrets.env" <<'PY'
+import os,shlex,sys
+source,target=sys.argv[1:]
+fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with open(source,encoding='utf-8') as stream,os.fdopen(fd,'w',encoding='utf-8') as out:
+    for line in stream:
+        name,encoded=line.rstrip('\n').split('\t',1)
+        out.write('export '+name+'='+shlex.quote(bytes.fromhex(encoded).decode())+'\n')
+PY
+  source "$d/secrets.env"
+  rm -f "$d/secrets.hex" "$d/secrets.env"
+fi
+touch "$d/secrets_loaded"
 echo running > "$d/status"; date +%s > "$d/started_at"; rm -f "$d/exit_code" "$d/finished_at"
 (while ! test -f "$d/exit_code"; do date +%s > "$d/heartbeat"; sleep 30; done) & hp=$!
 if cd "$workdir"; then bash "$d/command.sh" >>"$d/stdout.log" 2>>"$d/stderr.log"; rc=$?; else echo "workdir not found" >>"$d/stderr.log"; rc=125; fi
 echo "$rc" > "$d/exit_code"; date +%s > "$d/finished_at"; echo finished > "$d/status"; kill "$hp" 2>/dev/null || true; exit "$rc"
 WRAP
 chmod 700 "$d/wrapper.sh"; tmux new-session -d -s codex-{job} "$d/wrapper.sh $d {shlex.quote(remote_workdir)}"
+for _codex_wait in $(seq 1 100); do test -f "$d/secrets_loaded" && break; sleep 0.1; done
+test -f "$d/secrets_loaded" || {{ echo "job did not load its environment" >&2; exit 18; }}
 echo CODEX_JOB_STARTED={job}"""
-    result = _remote_shell(session, script, timeout=120)
+        result = _remote_shell(session, script, timeout=120)
     interval = max(10, min(monitor_interval_seconds, 300))
     if recover_on_runtime_loss:
         _remember_recovery_job(
@@ -3741,6 +4241,7 @@ echo CODEX_JOB_STARTED={job}"""
         "progress_file": f"/content/.codex-remote/jobs/{job}/progress.json",
         "stop_session_on_finish": stop_session_on_finish,
         "recover_on_runtime_loss": recover_on_runtime_loss,
+        "enabled_secret_names": sorted(environment),
         "output": _output(result),
     }
     if notify_on_completion or stop_session_on_finish or recover_on_runtime_loss:
@@ -3976,11 +4477,15 @@ def prepare_ssh_browser(
             "root_access": False,
         }
         _save_ssh_state(pending)
-        url_result = _colab(["url", "-s", session], timeout=30)
         return {
             "session_name": session,
             "browser_bootstrap_required": True,
-            "session_url": _redact(url_result.stdout.strip()),
+            "session_url": _created_session_url(session),
+            "session_url_presentation": "copy_paste_only",
+            "session_url_instructions": (
+                "Show session_url exactly inside a fenced code block, never as a Markdown "
+                "link. Ask the user to copy the entire raw URL into the browser address bar."
+            ),
             "bootstrap_code": bootstrap,
             "secret_name": SSH_SECRET_NAME,
             "warning": "Run this cell only in the returned Colab notebook, then pass its CODEX_SSH_MANIFEST output to register_ssh_manifest.",
@@ -4196,9 +4701,16 @@ def ssh_exec(
     """Run an arbitrary shell command through the explicitly enabled SSH tunnel."""
     if not command.strip():
         raise ValueError("command cannot be empty")
-    state = _load_ssh_state(_validate_session_name(session_name))
-    result = _ssh_run(state, command, timeout=max(1, min(timeout_seconds, 86400)))
-    return _output(result)
+    session = _validate_session_name(session_name)
+    state = _load_ssh_state(session)
+    environment = _secret_environment(session)
+    with _staged_ssh_secret_file(state, environment) as remote_path:
+        result = _ssh_run(
+            state,
+            _bash_secret_prelude(remote_path) + command,
+            timeout=max(1, min(timeout_seconds, 86400)),
+        )
+    return {"enabled_secret_names": sorted(environment), **_output(result)}
 
 
 @mcp.tool()
@@ -4320,6 +4832,7 @@ def stop_session(
     ledger = _load_session_ledger()
     ledger.pop(session, None)
     _save_session_ledger(ledger)
+    secret_broker.clear_session(STATE_ROOT, session)
     _save_lease_record(session, None)
     for key, monitor in _load_monitor_ledger().items():
         if monitor.get("session_name") == session:
