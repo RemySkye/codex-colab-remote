@@ -28,7 +28,7 @@ jobs:
           enable-cache: false
       - name: Audit locked dependencies
         run: |
-          uv export --project plugins/colab-remote --frozen --no-dev --output-file requirements-audit.txt
+          uv export --project plugins/colab-remote --frozen --no-dev --no-emit-project --output-file requirements-audit.txt
           uvx pip-audit -r requirements-audit.txt
 
   codeql:
