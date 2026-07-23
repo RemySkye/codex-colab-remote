@@ -11,10 +11,11 @@ from unittest.mock import patch
 
 
 MCP_ROOT = Path(__file__).resolve().parents[1] / "mcp"
+PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "colab_remote"
 sys.path.insert(0, str(MCP_ROOT))
 
 BROKER_SPEC = importlib.util.spec_from_file_location(
-    "colab_remote_secret_broker", MCP_ROOT / "secret_broker.py"
+    "colab_remote_secret_broker", PACKAGE_ROOT / "secret_broker.py"
 )
 secret_broker = importlib.util.module_from_spec(BROKER_SPEC)
 assert BROKER_SPEC.loader is not None
@@ -127,7 +128,9 @@ class SecretToolTests(unittest.TestCase):
     def test_prepare_command_contains_name_but_no_value_argument(self):
         result = server.prepare_local_secret("HF_TOKEN")
         self.assertIn("HF_TOKEN", result["command"])
-        self.assertIn("secret_broker.py", result["command"])
+        self.assertIn("colab-remote", result["command"])
+        self.assertIn("secrets", result["command"])
+        self.assertIn("add", result["command"])
         self.assertFalse(result["value_enters_mcp"])
 
     def test_list_returns_aliases_only(self):
@@ -221,29 +224,6 @@ class SecretToolTests(unittest.TestCase):
         self.assertNotIn(value, script)
         self.assertEqual(result["enabled_secret_names"], ["HF_TOKEN"])
 
-    def test_ssh_exec_uses_staged_aliases_without_embedding_values(self):
-        value = "ssh_secret_value_123"
-
-        @contextmanager
-        def staged(_state, _environment):
-            yield "/content/codex-ssh/.secret.hex"
-
-        with (
-            patch.object(server, "_load_ssh_state", return_value={"host": "example"}),
-            patch.object(
-                server,
-                "_secret_environment",
-                return_value={"HF_TOKEN": value},
-            ),
-            patch.object(server, "_staged_ssh_secret_file", side_effect=staged),
-            patch.object(server, "_ssh_run", return_value=completed()) as ssh,
-        ):
-            result = server.ssh_exec("training", "python train.py")
-        command = ssh.call_args.args[1]
-        self.assertIn("/content/codex-ssh/.secret.hex", command)
-        self.assertNotIn(value, command)
-        self.assertEqual(result["enabled_secret_names"], ["HF_TOKEN"])
-
     def test_redaction_covers_raw_base64_url_and_hex_forms(self):
         value = "sensitive_value_123"
         server._remember_secret_redactions({"TOKEN": value})
@@ -255,6 +235,15 @@ class SecretToolTests(unittest.TestCase):
         self.assertNotIn(encoded, output)
         self.assertNotIn(hex_encoded, output)
         self.assertEqual(output.count("[REDACTED_LOCAL_SECRET]"), 4)
+
+    def test_enable_can_require_explicit_access_acknowledgement(self):
+        config = {
+            **server.DEFAULT_CONFIG,
+            "require_secret_enable_approval": True,
+        }
+        with patch.object(server, "_load_config", return_value=config):
+            with self.assertRaises(PermissionError):
+                server.enable_local_secrets("training", ["HF_TOKEN"])
 
     def test_enable_rolls_back_grant_when_kernel_injection_fails(self):
         with (

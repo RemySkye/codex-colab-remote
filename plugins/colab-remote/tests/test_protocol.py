@@ -86,6 +86,12 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parallelism["maximum"], 8)
         self.assertTrue(all(item.get("description") for item in transfer.values()))
 
+        set_config = tools["set_config"].inputSchema["properties"]
+        self.assertIn("require_cost_acknowledgement", set_config)
+        self.assertIn("require_secret_enable_approval", set_config)
+        enable_secrets = tools["enable_local_secrets"].inputSchema["properties"]
+        self.assertIn("acknowledge_access", enable_secrets)
+
         for tool in tools.values():
             self.assertTrue(tool.description, f"{tool.name} needs a tool description")
             for name, schema in tool.inputSchema.get("properties", {}).items():

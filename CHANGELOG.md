@@ -1,11 +1,22 @@
 # Changelog
 
+## 0.7.0 - 2026-07-23
+
+- Removed the optional SSH/ngrok/SCP subsystem and its nine MCP tools; all runtime, terminal, job, notebook, and transfer operations now use Google's official Colab CLI.
+- Expanded the cross-platform `colab-remote` user CLI with clear top-level help, read-only diagnostics, version reporting, safe official-repository updates, validated JSONC configuration show/get/set/reset/describe/edit commands, and local-root allowlist helpers.
+- Fixed user-command updates to invalidate uv's same-version source-wheel cache, preventing a refreshed plugin from leaving an older `colab-remote` executable installed.
+- Documented that `require_secret_enable_approval=false` is standing permission for specifically named Colab Remote aliases only; it does not expose values or unrelated operating-system credentials.
+- Added the cross-platform `colab-remote secrets add|list|remove|doctor` command. Its list operation reads only the plugin-owned alias index and never enumerates the system credential store.
+- Generalized Linux credential support around the Freedesktop Secret Service standard rather than a specific desktop keyring.
+- Added configurable per-session allocation approval and local-secret enable approval. Allocation approval remains on by default; local-secret enable approval remains off by default.
+- Documented independent operation of up to eight named Colab sessions by default.
+
 ## 0.6.8
 
 - Added a validated raw Colab attachment URL directly to every successful `create_session` result for user-managed Secret setup and Notebook access approval. It is explicitly copy-paste-only because Markdown links and browser automation can encode the attachment fragment and open a disconnected scratchpad.
 - Documented that secret values stay in Colab and that the official CLI cannot list Secrets or change their toggles.
 - Added a cross-platform local secret broker backed by the operating-system credential manager. Users enter values through a masked terminal prompt while MCP sees only alias names and per-session grants.
-- Added name-only tools to refresh, enable, and disable aliases for kernel code, terminal commands, persistent jobs, local files, and optional SSH.
+- Added name-only tools to refresh, enable, and disable aliases for kernel code, terminal commands, persistent jobs, and local files.
 - Added owner-only temporary-file injection and output redaction so values do not enter MCP arguments, process command lines, metadata, or normal returned output.
 
 ## 0.6.7

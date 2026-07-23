@@ -13,7 +13,6 @@ try {
     $env:COLAB_REMOTE_PYTHON = 'colab-remote-test-python'
     & (Join-Path $PSScriptRoot '..\install.ps1') `
         -Distro Ubuntu `
-        -EnableSshTunnel `
         -DefaultLanguage r `
         -DefaultRuntimeVersion 2026.04 `
         -DefaultMaxLifetimeMinutes 90 `
@@ -26,7 +25,6 @@ try {
     foreach ($expected in @(
         'install.py',
         '-Distro Ubuntu',
-        '-EnableSshTunnel',
         '-DefaultLanguage r',
         '-DefaultRuntimeVersion 2026.04',
         '-DefaultMaxLifetimeMinutes 90',

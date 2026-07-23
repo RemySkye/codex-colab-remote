@@ -8,4 +8,4 @@ dependencies:
   tools:
     - type: "mcp"
       value: "colab-remote"
-      description: "Typed Colab compute, notebook, resumable file, monitoring, recovery, and optional SSH tools"
+      description: "Typed Colab compute, notebook, resumable file, monitoring, and recovery tools"

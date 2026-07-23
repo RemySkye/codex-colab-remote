@@ -11,6 +11,3 @@
 9. Before retrying an expensive command, explain expected quota/compute impact.
 10. For a failed or cancelled managed transfer, inspect `transfer_status` and use `resume_transfer`; checksum verification protects the final result. Do not discard completed chunks unless the user no longer needs recovery.
 11. Stop abandoned sessions after user confirmation and verify cleanup.
-12. If SSH fails, call `ssh_status`. Confirm the paid-plan/positive-balance requirement, Colab Secret existence and notebook access, ngrok TCP availability, and local OpenSSH tools without requesting the token. When the CLI cannot read Secrets, use `prepare_ssh_browser` and `register_ssh_manifest` through the attached Colab notebook.
-13. If host-key verification changes, do not bypass it. Call `disable_ssh`, revoke the old state, and create a fresh tunnel.
-14. If an SSH key or endpoint may be exposed, disable SSH immediately and tell the user to rotate the ngrok token.

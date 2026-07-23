@@ -86,22 +86,22 @@
       "allowed": "A relative folder path inside codex-colab; no absolute path, empty component, '.', or '..'"
     },
     "require_cost_acknowledgement": {
-      "description": "Safety control requiring user approval before allocation. Always forced to true.",
+      "description": "Ask for explicit user approval before every new Colab allocation. Set false only when the user grants standing authorization for session creation.",
       "type": "boolean",
       "default": true,
-      "allowed": [true]
+      "allowed": [false, true]
+    },
+    "require_secret_enable_approval": {
+      "description": "Ask before exposing a locally stored credential to a Colab session. False lets the LLM enable only named Colab Remote aliases automatically; values remain hidden.",
+      "type": "boolean",
+      "default": false,
+      "allowed": [false, true]
     },
     "allowed_local_roots": {
       "description": "Exact existing local folders the plugin may access for files and notebooks.",
       "type": "array of absolute paths",
       "default": [],
       "allowed": "Existing directories approved by the user"
-    },
-    "ssh_tunnel_enabled": {
-      "description": "Whether the optional user-approved public ngrok SSH workflow is available.",
-      "type": "boolean",
-      "default": false,
-      "allowed": [false, true]
     }
   }
 }

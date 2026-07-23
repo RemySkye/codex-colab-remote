@@ -48,8 +48,6 @@ CONFIG_FLAG_DESTINATIONS = {
     "-EnableNotifications": "notification_mode",
     "--disable-notifications": "notification_mode",
     "-DisableNotifications": "notification_mode",
-    "--enable-ssh": "enable_ssh",
-    "-EnableSshTunnel": "enable_ssh",
 }
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
@@ -246,7 +244,6 @@ def parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     result.set_defaults(notification_mode="off")
-    result.add_argument("--enable-ssh", "-EnableSshTunnel", action="store_true")
     result.add_argument(
         "--skip-authentication", "-SkipAuthentication", action="store_true"
     )
@@ -289,6 +286,7 @@ class Installer:
         self.restore_existing_distro()
         self.linux_home = ""
         self.colab_bin = ""
+        self.installed_plugin_root: Path | None = None
         local_root = Path(__file__).resolve().parent
         self.marketplace_is_local = self.valid_local_marketplace(local_root)
         self.marketplace_source = (
@@ -603,11 +601,87 @@ fi
         self.step("Adding or refreshing the Codex plugin marketplace")
         self.refresh_marketplace()
         self.step("Installing or updating Colab Remote")
-        self.run(["codex", "plugin", "add", f"{PLUGIN}@{MARKETPLACE}"])
+        result = self.run(
+            ["codex", "plugin", "add", f"{PLUGIN}@{MARKETPLACE}"],
+            capture=True,
+        )
+        output = ANSI_ESCAPE.sub("", result.stdout or "")
+        root_match = re.search(r"(?m)^Installed plugin root:\s*(.+?)\s*$", output)
+        if root_match:
+            candidate = Path(root_match.group(1)).expanduser().resolve()
+            if candidate.is_dir():
+                self.installed_plugin_root = candidate
         if not self.plugin_is_installed():
             raise RuntimeError(
                 "Codex did not report Colab Remote as installed after the update"
             )
+
+    def plugin_source_path(self) -> Path:
+        if self.installed_plugin_root is not None:
+            if (
+                (self.installed_plugin_root / "pyproject.toml").is_file()
+                and (self.installed_plugin_root / "colab_remote" / "cli.py").is_file()
+            ):
+                return self.installed_plugin_root
+        result = self.run(
+            ["codex", "plugin", "list", "--json"],
+            check=False,
+            capture=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"could not locate the installed Colab Remote plugin: {self.command_error(result)}"
+            )
+        try:
+            installed = json.loads(result.stdout or "{}").get("installed", [])
+        except (AttributeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Codex returned invalid plugin metadata") from exc
+        for plugin in installed:
+            if plugin.get("pluginId") != f"{PLUGIN}@{MARKETPLACE}":
+                continue
+            source = plugin.get("source")
+            path = source.get("path") if isinstance(source, dict) else None
+            if not isinstance(path, str):
+                break
+            plugin_root = Path(path).expanduser().resolve()
+            if (
+                (plugin_root / "pyproject.toml").is_file()
+                and (plugin_root / "colab_remote" / "cli.py").is_file()
+            ):
+                return plugin_root
+            break
+        raise RuntimeError("installed Colab Remote source directory was not found")
+
+    def install_user_cli(self, uv_bin: Path) -> None:
+        self.step("Installing or updating the colab-remote command")
+        plugin_root = self.plugin_source_path()
+        self.run(
+            [
+                str(uv_bin),
+                "tool",
+                "install",
+                "--force",
+                "--refresh-package",
+                "codex-colab-remote",
+                str(plugin_root),
+            ]
+        )
+        executable = "colab-remote.exe" if self.windows else "colab-remote"
+        installed = Path.home() / ".local" / "bin" / executable
+        if not installed.is_file():
+            raise RuntimeError(
+                f"uv did not create the expected user command: {installed}"
+            )
+        path_update = self.run(
+            [str(uv_bin), "tool", "update-shell"],
+            check=False,
+            capture=True,
+        )
+        if path_update.returncode != 0:
+            print(
+                f"Warning: add {installed.parent} to PATH to run colab-remote directly."
+            )
+        self.run([str(installed), "--help"], capture=True)
 
     def approved_roots(self) -> list[str]:
         roots = []
@@ -672,7 +746,6 @@ fi
             "default_drive_checkpoint_folder": "checkpoints",
             "require_cost_acknowledgement": True,
             "allowed_local_roots": self.approved_roots(),
-            "ssh_tunnel_enabled": self.options.enable_ssh,
         })
         return defaults
 
@@ -692,6 +765,8 @@ fi
                 )
             loaded.pop("notifications_enabled", None)
             loaded.pop("_documentation", None)
+            loaded.pop("ssh_secret_name", None)
+            loaded.pop("ssh_tunnel_enabled", None)
             config = {**defaults, **loaded}
             updates = {
                 "distro": "distro",
@@ -702,7 +777,6 @@ fi
                 "max_lifetime": "default_max_lifetime_minutes",
                 "notification_mode": "notification_mode",
                 "allowed_root": "allowed_local_roots",
-                "enable_ssh": "ssh_tunnel_enabled",
             }
             for option_name in explicit:
                 config_name = updates[option_name]
@@ -815,6 +889,7 @@ fi
             uv_bin = self.install_uv(Path(raw_temporary))
             self.install_colab_cli(uv_bin)
         self.install_plugin()
+        self.install_user_cli(uv_bin)
         self.write_config()
         if existing_install:
             self.step("Preserving existing Google Colab authentication")
@@ -823,10 +898,6 @@ fi
         self.smoke_test()
         action = "updated" if existing_install else "installed"
         print(f"\nColab Remote is {action}. Restart Codex or start a new task.")
-        if self.options.enable_ssh:
-            print(
-                "SSH is optional. Add NGROK_AUTHTOKEN to Colab Secrets before enabling a tunnel."
-            )
         if self.options.skip_authentication:
             print(
                 "Run the installer again without --skip-authentication when you are ready to sign in."

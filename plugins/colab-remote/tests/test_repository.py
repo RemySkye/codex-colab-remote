@@ -122,7 +122,16 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("Preserving existing Google Colab authentication", installer)
         self.assertIn("skip_authentication", installer)
         self.assertIn("chmod", installer)
-        self.assertIn("enable_ssh", installer)
+        self.assertNotIn("--enable-ssh", installer)
+        self.assertFalse(
+            (
+                REPOSITORY_ROOT
+                / "plugins"
+                / "colab-remote"
+                / "assets"
+                / "bootstrap_ssh.py.tmpl"
+            ).exists()
+        )
 
     def test_posix_bootstrap_is_pinned_and_secure(self):
         shared = (REPOSITORY_ROOT / "install.py").read_text(encoding="utf-8")
@@ -152,6 +161,26 @@ class RepositoryTests(unittest.TestCase):
             "wiki/Home.md",
         ):
             self.assertTrue((REPOSITORY_ROOT / relative).is_file(), relative)
+
+    def test_readme_documents_every_configuration_setting(self):
+        schema = json.loads(
+            (ROOT / "config_schema.json").read_text(encoding="utf-8")
+        )
+        readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+        for name in schema["settings"]:
+            self.assertIn(f"`{name}`", readme)
+
+    def test_public_installers_and_updater_track_main(self):
+        expected = (
+            "https://raw.githubusercontent.com/RemySkye/"
+            "codex-colab-remote/main/install.py"
+        )
+        self.assertIn(expected, (REPOSITORY_ROOT / "install.ps1").read_text())
+        self.assertIn(expected, (REPOSITORY_ROOT / "install.sh").read_text())
+        self.assertIn(
+            "codex-colab-remote/main/install.py",
+            (ROOT / "colab_remote" / "cli.py").read_text(encoding="utf-8"),
+        )
 
     def test_posix_one_liner_is_short_and_interactive(self):
         readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
