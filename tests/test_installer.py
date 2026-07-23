@@ -336,13 +336,14 @@ class InstallerTests(unittest.TestCase):
         subject.run = MagicMock(return_value=completed())
         subject.installed_plugin_root = ROOT / "plugins" / "colab-remote"
         with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            executable = home / ".local" / "bin" / "colab-remote"
-            executable.parent.mkdir(parents=True)
+            command_directory = Path(directory) / "uv-bin"
+            command_directory.mkdir(parents=True)
+            uv_bin = command_directory / "uv"
+            executable = command_directory / "colab-remote"
             executable.write_text("", encoding="utf-8")
-            with patch.object(installer.Path, "home", return_value=home):
-                subject.install_user_cli(Path("/uv"))
-        install_command = subject.run.call_args_list[0].args[0]
+            subject.install_user_cli(uv_bin)
+        install_call = subject.run.call_args_list[0]
+        install_command = install_call.args[0]
         self.assertIn("--force", install_command)
         self.assertIn("--refresh-package", install_command)
         refresh_index = install_command.index("--refresh-package")
@@ -350,6 +351,53 @@ class InstallerTests(unittest.TestCase):
             install_command[refresh_index + 1],
             "codex-colab-remote",
         )
+        self.assertEqual(
+            install_call.kwargs["env"]["UV_TOOL_BIN_DIR"],
+            str(command_directory),
+        )
+
+    def test_locked_current_plugin_is_treated_as_an_idempotent_update(self):
+        options = installer.parser().parse_args([])
+        subject = installer.Installer(options, platform="win32")
+        subject.refresh_marketplace = MagicMock()
+        subject.run = MagicMock(
+            return_value=completed(
+                returncode=1,
+                stderr="failed to back up plugin cache entry: Access is denied.",
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plugin_root = root / "plugins" / installer.PLUGIN
+            plugin_manifest = plugin_root / ".codex-plugin" / "plugin.json"
+            plugin_manifest.parent.mkdir(parents=True)
+            plugin_manifest.write_text(
+                json.dumps({"name": installer.PLUGIN, "version": "0.7.0+test"}),
+                encoding="utf-8",
+            )
+            marketplace = root / ".agents" / "plugins" / "marketplace.json"
+            marketplace.parent.mkdir(parents=True)
+            marketplace.write_text(
+                json.dumps(
+                    {
+                        "name": installer.MARKETPLACE,
+                        "plugins": [
+                            {
+                                "name": installer.PLUGIN,
+                                "source": {
+                                    "source": "local",
+                                    "path": f"./plugins/{installer.PLUGIN}",
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            subject.marketplace_root = MagicMock(return_value=root)
+            subject.plugin_source_path = MagicMock(return_value=plugin_root)
+            subject.install_plugin()
+        self.assertEqual(subject.installed_plugin_root, plugin_root)
 
     def test_shared_installer_rejects_old_python(self):
         original = installer.sys.version_info

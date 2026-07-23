@@ -47,7 +47,7 @@ It downloads the official repository's `install.py` from the latest `main` branc
 
 The installer detects `colab-remote@colab-remote`, refreshes Git-backed marketplaces, reuses a valid local development marketplace, repairs a stale local registration that no longer exposes the plugin, installs the new version, and verifies the result. It does not run a separate uninstall first; Codex handles the replacement.
 
-After installing or updating, run `colab-remote --help` for the complete user command and `colab-remote doctor` for read-only local checks. Doctor never lists credential aliases or values.
+After installing or updating, run `colab-remote --help` for the complete user command and `colab-remote doctor` for read-only local checks. Doctor never lists credential aliases or values. The installer places `colab-remote` beside `uv`, so it is immediately available whenever an existing `uv` was already on `PATH`; if the installer had to add that directory for the first time, open a new terminal once.
 
 Existing Colab OAuth credentials are not reopened or replaced during an update. Existing `~/.codex/colab-remote/config.jsonc` values and future unknown settings are preserved. Older `config.json` files are migrated automatically. If an installer configuration option is explicitly supplied again, only that setting is updated.
 

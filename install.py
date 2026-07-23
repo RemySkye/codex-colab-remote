@@ -479,29 +479,33 @@ fi
         return root / ".agents" / "plugins" / "marketplace.json"
 
     @classmethod
+    def marketplace_plugin_root(cls, root: Path) -> Path:
+        manifest = json.loads(
+            cls.marketplace_manifest(root).read_text(encoding="utf-8")
+        )
+        if manifest.get("name") != MARKETPLACE:
+            raise ValueError("unexpected marketplace name")
+        entry = next(
+            item
+            for item in manifest.get("plugins", [])
+            if item.get("name") == PLUGIN
+        )
+        source = entry.get("source", {})
+        relative = source.get("path") if isinstance(source, dict) else source
+        if not isinstance(relative, str) or not relative.startswith("./"):
+            raise ValueError("invalid plugin source path")
+        plugin_root = (root / relative[2:]).resolve()
+        plugin_manifest = plugin_root / ".codex-plugin" / "plugin.json"
+        metadata = json.loads(plugin_manifest.read_text(encoding="utf-8"))
+        if metadata.get("name") != PLUGIN:
+            raise ValueError("unexpected plugin name")
+        return plugin_root
+
+    @classmethod
     def valid_local_marketplace(cls, root: Path) -> bool:
         try:
-            manifest = json.loads(
-                cls.marketplace_manifest(root).read_text(encoding="utf-8")
-            )
-            if manifest.get("name") != MARKETPLACE:
-                return False
-            entry = next(
-                item
-                for item in manifest.get("plugins", [])
-                if item.get("name") == PLUGIN
-            )
-            source = entry.get("source", {})
-            if isinstance(source, dict):
-                relative = source.get("path")
-            else:
-                relative = source
-            if not isinstance(relative, str) or not relative.startswith("./"):
-                return False
-            plugin_root = (root / relative[2:]).resolve()
-            plugin_manifest = plugin_root / ".codex-plugin" / "plugin.json"
-            metadata = json.loads(plugin_manifest.read_text(encoding="utf-8"))
-            return metadata.get("name") == PLUGIN
+            cls.marketplace_plugin_root(root)
+            return True
         except (OSError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
             return False
 
@@ -603,8 +607,35 @@ fi
         self.step("Installing or updating Colab Remote")
         result = self.run(
             ["codex", "plugin", "add", f"{PLUGIN}@{MARKETPLACE}"],
+            check=False,
             capture=True,
         )
+        if result.returncode != 0:
+            marketplace_root = self.marketplace_root()
+            try:
+                if marketplace_root is None:
+                    raise ValueError("marketplace root is unavailable")
+                desired_root = self.marketplace_plugin_root(marketplace_root)
+                desired = json.loads(
+                    (desired_root / ".codex-plugin" / "plugin.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                installed_root = self.plugin_source_path()
+                installed = json.loads(
+                    (
+                        installed_root / ".codex-plugin" / "plugin.json"
+                    ).read_text(encoding="utf-8")
+                )
+                if installed.get("version") != desired.get("version"):
+                    raise ValueError("installed plugin version is stale")
+                self.installed_plugin_root = installed_root
+                print(f"Colab Remote {desired['version']} is already current.")
+                return
+            except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+                raise RuntimeError(
+                    f"could not install Colab Remote: {self.command_error(result)}"
+                ) from None
         output = ANSI_ESCAPE.sub("", result.stdout or "")
         root_match = re.search(r"(?m)^Installed plugin root:\s*(.+?)\s*$", output)
         if root_match:
@@ -655,6 +686,9 @@ fi
     def install_user_cli(self, uv_bin: Path) -> None:
         self.step("Installing or updating the colab-remote command")
         plugin_root = self.plugin_source_path()
+        command_directory = uv_bin.parent
+        tool_environment = os.environ.copy()
+        tool_environment["UV_TOOL_BIN_DIR"] = str(command_directory)
         self.run(
             [
                 str(uv_bin),
@@ -664,10 +698,11 @@ fi
                 "--refresh-package",
                 "codex-colab-remote",
                 str(plugin_root),
-            ]
+            ],
+            env=tool_environment,
         )
         executable = "colab-remote.exe" if self.windows else "colab-remote"
-        installed = Path.home() / ".local" / "bin" / executable
+        installed = command_directory / executable
         if not installed.is_file():
             raise RuntimeError(
                 f"uv did not create the expected user command: {installed}"
@@ -676,6 +711,7 @@ fi
             [str(uv_bin), "tool", "update-shell"],
             check=False,
             capture=True,
+            env=tool_environment,
         )
         if path_update.returncode != 0:
             print(

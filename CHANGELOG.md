@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 - 2026-07-23
+
+- Install the `colab-remote` command beside `uv` so existing installations can use it immediately without another shell restart.
+- Treat a locked, already-current Codex plugin cache as a successful idempotent update after verifying the installed and marketplace versions match.
+- Document when a one-time terminal restart is still needed after installing `uv` for the first time.
+
 ## 0.7.0 - 2026-07-23
 
 - Removed the optional SSH/ngrok/SCP subsystem and its nine MCP tools; all runtime, terminal, job, notebook, and transfer operations now use Google's official Colab CLI.

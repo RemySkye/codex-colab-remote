@@ -6,7 +6,7 @@
 
 Colab Remote lets Codex create and operate your Google Colab runtimes through Google's official Colab CLI. Codex can choose hardware, run Python/R/Julia, use a Linux terminal, manage long jobs, move large files, edit notebooks, checkpoint to Google Drive, recover opted-in work, and release compute when finished.
 
-Version 0.7.0 supports Windows, Linux, and macOS. It does not use SSH, ngrok, a public inbound tunnel, Google Cloud ADC, or service-account credentials.
+Version 0.7.1 supports Windows, Linux, and macOS. It does not use SSH, ngrok, a public inbound tunnel, Google Cloud ADC, or service-account credentials.
 
 ## What you get
 
@@ -55,6 +55,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-rem
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/RemySkye/codex-colab-remote/main/install.sh)"
 ```
+
+The installer places `colab-remote` beside `uv`. If it installed `uv` for the first time, open a new terminal once before running `colab-remote --help`.
 
 The small PowerShell and shell launchers download the shared cross-platform `install.py` from `main`. That installer:
 
