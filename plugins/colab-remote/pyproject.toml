@@ -5,7 +5,7 @@ description = "Secure MCP tools for authorized Google Colab sessions"
 requires-python = ">=3.11"
 dependencies = [
   "keyring>=25.6,<26",
-  "mcp>=1.20,<2",
+  "mcp>=1.20,<3",
   "pydantic>=2.11,<3",
   "SecretStorage>=3.3,<4; sys_platform == 'linux'",
 ]
