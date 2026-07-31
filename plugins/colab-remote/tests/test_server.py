@@ -24,6 +24,24 @@ def completed(stdout="", stderr="", returncode=0):
 
 
 class ServerTests(unittest.TestCase):
+    def setUp(self):
+        self._readiness_patch = patch.object(
+            server,
+            "_wait_until_ready_impl",
+            return_value={
+                "ready": True,
+                "attempts": 1,
+                "status": {"available": True},
+                "terminal_ready": True,
+                "kernel_ready": True,
+                "kernel": {"language": "python", "verified": True},
+                "memory": {"available": True, "gib": 51.0},
+                "allocation": {"actual_type": "cpu", "gpus": [], "tpu_devices": []},
+            },
+        )
+        self._readiness_patch.start()
+        self.addCleanup(self._readiness_patch.stop)
+
     def test_subprocesses_cannot_read_mcp_stdin(self):
         with patch.object(server.subprocess, "run", return_value=completed()) as run:
             server._run(["example"])
@@ -272,6 +290,7 @@ class ServerTests(unittest.TestCase):
                 "test_notification",
                 "transfer_status",
                 "upload_file",
+                "wait_until_ready",
                 "watch_job",
             },
         )
@@ -916,7 +935,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("COLAB_REMOTE_LANGUAGE=julia", command)
         self.assertIn("/plugin/scripts/colab_compat.py", command)
 
-    def test_create_returns_session_when_post_create_probes_fail(self):
+    def test_create_stops_session_when_readiness_probe_fails(self):
         with (
             patch.object(
                 server, "_load_config", return_value=dict(server.DEFAULT_CONFIG)
@@ -929,7 +948,12 @@ class ServerTests(unittest.TestCase):
             patch.object(
                 server,
                 "_colab",
-                side_effect=[completed("created"), RuntimeError("status unavailable")],
+                side_effect=[completed("created"), completed("stopped")],
+            ),
+            patch.object(
+                server,
+                "_wait_until_ready_impl",
+                side_effect=RuntimeError("terminal unavailable"),
             ),
             patch.object(
                 server,
@@ -948,10 +972,8 @@ class ServerTests(unittest.TestCase):
                 server, "_session_compute_metadata", return_value={"tracked": True}
             ),
         ):
-            result = server.create_session("created-session", acknowledge_cost=True)
-        self.assertEqual(result["session_name"], "created-session")
-        self.assertFalse(result["status"]["available"])
-        self.assertFalse(result["memory"]["available"])
+            with self.assertRaisesRegex(RuntimeError, "readiness verification failed"):
+                server.create_session("created-session", acknowledge_cost=True)
 
     def test_session_compute_duration_warning(self):
         with (
@@ -1814,6 +1836,145 @@ class ServerTests(unittest.TestCase):
             result = server._write_notification("Title", "Body")
         self.assertTrue(result["desktop_delivered"])
         self.assertEqual(run.call_args.args[0][0], "notify-send")
+
+
+class ReliabilityTests(unittest.TestCase):
+    def test_wait_until_ready_checks_terminal_memory_and_allocation(self):
+        with (
+            patch.object(server, "_colab", return_value=completed("status")),
+            patch.object(
+                server, "_remote_shell", return_value=completed("CODEX_TERMINAL_READY=1\n")
+            ),
+            patch.object(
+                server, "_memory_status", return_value={"available": True, "gib": 32.0}
+            ),
+            patch.object(
+                server,
+                "_actual_allocation",
+                return_value={"actual_type": "gpu", "gpus": [{"name": "T4"}], "tpu_devices": []},
+            ),
+        ):
+            result = server._wait_until_ready_impl(
+                "ready-session",
+                language="python",
+                timeout_seconds=1,
+                verify_kernel=False,
+                require_high_ram=True,
+            )
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["terminal_ready"])
+        self.assertEqual(result["allocation"]["actual_type"], "gpu")
+
+    def test_wait_until_ready_rejects_unmet_high_ram_immediately(self):
+        with (
+            patch.object(server, "_colab", return_value=completed("status")),
+            patch.object(
+                server, "_remote_shell", return_value=completed("CODEX_TERMINAL_READY=1\n")
+            ),
+            patch.object(
+                server, "_memory_status", return_value={"available": True, "gib": 12.0}
+            ),
+            patch.object(
+                server,
+                "_actual_allocation",
+                return_value={"actual_type": "cpu", "gpus": [], "tpu_devices": []},
+            ),
+            patch.object(server.time, "sleep") as sleep,
+        ):
+            with self.assertRaises(server._HighRamRequirementError):
+                server._wait_until_ready_impl(
+                    "low-ram-session",
+                    language="python",
+                    timeout_seconds=60,
+                    verify_kernel=False,
+                    require_high_ram=True,
+                )
+        sleep.assert_not_called()
+
+    def test_lease_extension_updates_fresh_watcher_record(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            lease_root = Path(temporary)
+            now = int(server.time.time())
+            record = {"expires_at": now + 600}
+            lease_path = lease_root / "lease-session.json"
+            lease_path.write_text(
+                '{"session_name":"lease-session","expires_at":%d,"heartbeat":%d}'
+                % (now + 60, now),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(server, "LEASES_ROOT", lease_root),
+                patch.object(server, "_load_session_ledger", return_value={"lease-session": record}),
+                patch.object(server, "_save_lease_record") as save,
+            ):
+                result = server._start_session_lease("lease-session")
+        self.assertTrue(result["already_running"])
+        self.assertEqual(result["expires_at"], now + 600)
+        save.assert_called_once()
+
+    def test_split_local_rebuilds_when_manifest_hash_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "payload.bin"
+            payload.write_bytes(b"abcdef")
+            parts_root = root / "parts"
+            parts_root.mkdir()
+            (parts_root / "part-000000").write_bytes(b"stale")
+            server.managed_transfer.save_manifest(
+                root,
+                {
+                    "payload_sha256": "stale-hash",
+                    "payload_bytes": 5,
+                    "chunk_size": 3,
+                },
+            )
+            digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            parts = server.managed_transfer.split_local(
+                payload, parts_root, 3, payload_sha256=digest
+            )
+            part_bytes = [part.read_bytes() for part in parts]
+        self.assertEqual(part_bytes, [b"abc", b"def"])
+
+    def test_directory_metadata_changes_when_content_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "nested").mkdir()
+            child = root / "nested" / "file.txt"
+            child.write_text("before", encoding="utf-8")
+            before = server.managed_transfer.local_path_metadata(root)
+            child.write_text("after", encoding="utf-8")
+            after = server.managed_transfer.local_path_metadata(root)
+        self.assertEqual(before["kind"], "directory")
+        self.assertNotEqual(before["sha256"], after["sha256"])
+
+    def test_remote_metadata_falls_back_to_download_when_shell_marker_is_lost(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def fake_download(args, **_kwargs):
+                Path(args[-1]).write_bytes(b"remote-bytes")
+                return completed()
+
+            with (
+                patch.object(server, "TRANSFERS_ROOT", root),
+                patch.object(
+                    server, "_remote_shell", side_effect=RuntimeError("marker missing")
+                ),
+                patch.object(server, "_colab", side_effect=fake_download),
+                patch.object(server, "_wsl_path", side_effect=lambda path: str(path)),
+                patch.object(server.time, "sleep"),
+            ):
+                metadata = server._remote_path_metadata("marker-session", "/content/data.bin")
+        self.assertEqual(metadata["kind"], "file")
+        self.assertEqual(metadata["bytes"], len(b"remote-bytes"))
+
+    def test_managed_transfer_treats_only_missing_marker_as_recoverable(self):
+        self.assertTrue(
+            server.managed_transfer.shell_marker_missing(
+                RuntimeError("Remote command did not return CODEX_REMOTE_SHELL=")
+            )
+        )
+        self.assertFalse(server.managed_transfer.shell_marker_missing(RuntimeError("exit 12")))
 
 
 if __name__ == "__main__":

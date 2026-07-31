@@ -22,6 +22,11 @@ TRANSFER_ID = re.compile(r"[0-9a-f]{24}")
 SAFE_PART = re.compile(r"part-[0-9]{6}")
 
 
+def shell_marker_missing(error: BaseException) -> bool:
+    """Return whether Colab lost only the wrapper completion marker."""
+    return "CODEX_REMOTE_SHELL=" in str(error)
+
+
 def directory(api: Any, transfer_id: str) -> Path:
     if not TRANSFER_ID.fullmatch(transfer_id):
         raise ValueError("Invalid transfer_id")
@@ -83,12 +88,71 @@ def progress(
     save_state(api, state)
 
 
-def split_local(payload: Path, parts_root: Path, chunk_size: int) -> list[Path]:
+def local_path_metadata(path: Path) -> dict[str, Any]:
+    """Return a stable content digest for a file or directory."""
+    if path.is_file():
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                digest.update(block)
+        return {"kind": "file", "bytes": path.stat().st_size, "sha256": digest.hexdigest()}
+    if not path.is_dir():
+        raise FileNotFoundError(path)
+    digest = hashlib.sha256()
+    total = 0
+    for child in sorted(
+        (item for item in path.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(path).as_posix(),
+    ):
+        relative = child.relative_to(path).as_posix()
+        child_hash = hashlib.sha256()
+        with child.open("rb") as stream:
+            for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                child_hash.update(block)
+        size = child.stat().st_size
+        total += size
+        digest.update(
+            relative.encode()
+            + b"\0"
+            + str(size).encode()
+            + b"\0"
+            + child_hash.hexdigest().encode()
+            + b"\0"
+        )
+    return {"kind": "directory", "bytes": total, "sha256": digest.hexdigest()}
+
+
+def save_manifest(root: Path, payload: dict[str, Any]) -> None:
+    temporary = root / f"manifest.{os.getpid()}.tmp"
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, root / "manifest.json")
+
+
+def split_local(
+    payload: Path,
+    parts_root: Path,
+    chunk_size: int,
+    *,
+    payload_sha256: str | None = None,
+) -> list[Path]:
     parts_root.mkdir(parents=True, exist_ok=True)
     expected = (payload.stat().st_size + chunk_size - 1) // chunk_size
     existing = sorted(parts_root.glob("part-*"))
+    manifest = parts_root.parent / "manifest.json"
+    manifest_matches = False
+    if payload_sha256 is not None and manifest.is_file():
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_matches = (
+                value.get("payload_sha256") == payload_sha256
+                and int(value.get("payload_bytes", -1)) == payload.stat().st_size
+                and int(value.get("chunk_size", -1)) == chunk_size
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            manifest_matches = False
     if (
-        len(existing) == expected
+        manifest_matches
+        and len(existing) == expected
         and sum(path.stat().st_size for path in existing) == payload.stat().st_size
     ):
         return existing
@@ -151,16 +215,37 @@ def safe_extract(archive: Path, destination: Path, overwrite: bool) -> None:
     shutil.move(str(payload), str(destination))
 
 
-def remote_parts(api: Any, session: str, remote_stage: str) -> dict[str, int]:
+def remote_parts(api: Any, session: str, remote_stage: str) -> dict[str, dict[str, Any]]:
     script = f"""python3 - <<'PY'
-import json
+import hashlib, json
 from pathlib import Path
 d=Path({remote_stage!r})/"parts"
-print("CODEX_TRANSFER_PARTS="+json.dumps({{p.name:p.stat().st_size for p in d.glob("part-*") if p.is_file()}},separators=(",",":")))
+value={{}}
+for p in d.glob("part-*"):
+    if not p.is_file():
+        continue
+    h=hashlib.sha256()
+    with p.open("rb") as stream:
+        for block in iter(lambda: stream.read(8*1024*1024), b""):
+            h.update(block)
+    value[p.name]={{"bytes":p.stat().st_size,"sha256":h.hexdigest()}}
+print("CODEX_TRANSFER_PARTS="+json.dumps(value,separators=(",",":")))
 PY"""
-    result = api._remote_shell(session, script, timeout=120)
+    try:
+        result = api._remote_shell(session, script, timeout=120)
+    except Exception as exc:
+        if shell_marker_missing(exc):
+            return {}
+        raise
     value = api._extract_json_marker(result.stdout, "CODEX_TRANSFER_PARTS=")
-    return {str(name): int(size) for name, size in value.items()}
+    return {
+        str(name): {
+            "bytes": int(details["bytes"]),
+            "sha256": str(details["sha256"]),
+        }
+        for name, details in value.items()
+        if isinstance(details, dict)
+    }
 
 
 def parallel_parts(
@@ -213,30 +298,76 @@ def upload(api: Any, state: dict[str, Any]) -> None:
     destination = api._validate_remote_path(str(state["remote_path"]))
     root = directory(api, transfer_id)
     compress = bool(state.get("compress")) or source.is_dir()
+    content_metadata = local_path_metadata(source)
+    previous_content_hash = state.get("content_sha256")
+    if previous_content_hash and previous_content_hash != content_metadata["sha256"]:
+        raise RuntimeError("The local source changed while this transfer was paused")
     payload = root / "payload.tar.gz" if compress else source
     if compress:
         create_archive(source, payload)
-    parts_root = root / "parts"
-    parts = split_local(payload, parts_root, api.TRANSFER_CHUNK_SIZE)
-    state["bytes_total"] = payload.stat().st_size
-    state["chunks_total"] = len(parts)
-    state["compressed"] = compress
-    remote_stage = f"/content/.codex-remote/transfers/managed/{transfer_id}"
-    api._remote_shell(
-        session, f"mkdir -p {shlex.quote(remote_stage)}/parts", timeout=120
+    payload_metadata = local_path_metadata(payload)
+    previous_payload_hash = state.get("source_sha256")
+    if previous_payload_hash and previous_payload_hash != payload_metadata["sha256"]:
+        raise RuntimeError("The local source changed while this transfer was paused")
+    state.update(
+        {
+            "bytes_total": payload_metadata["bytes"],
+            "chunks_total": 0,
+            "compressed": compress,
+            "source_sha256": payload_metadata["sha256"],
+            "content_kind": content_metadata["kind"],
+            "content_bytes": content_metadata["bytes"],
+            "content_sha256": content_metadata["sha256"],
+        }
     )
+    parts_root = root / "parts"
+    save_manifest(
+        root,
+        {
+            "payload_sha256": payload_metadata["sha256"],
+            "payload_bytes": payload_metadata["bytes"],
+            "chunk_size": api.TRANSFER_CHUNK_SIZE,
+            "content_kind": content_metadata["kind"],
+            "content_bytes": content_metadata["bytes"],
+            "content_sha256": content_metadata["sha256"],
+        },
+    )
+    parts = split_local(
+        payload,
+        parts_root,
+        api.TRANSFER_CHUNK_SIZE,
+        payload_sha256=payload_metadata["sha256"],
+    )
+    state["chunks_total"] = len(parts)
+    save_state(api, state)
+    remote_stage = f"/content/.codex-remote/transfers/managed/{transfer_id}"
+    try:
+        api._remote_shell(
+            session, f"mkdir -p {shlex.quote(remote_stage)}/parts", timeout=120
+        )
+    except Exception as exc:
+        if not shell_marker_missing(exc):
+            raise
     existing = (
         remote_parts(api, session, remote_stage) if state.get("resume", True) else {}
     )
     completed = [
         (part.name, part.stat().st_size)
         for part in parts
-        if existing.get(part.name) == part.stat().st_size
+        if (
+            existing.get(part.name, {}).get("bytes") == part.stat().st_size
+            and existing.get(part.name, {}).get("sha256")
+            == local_path_metadata(part)["sha256"]
+        )
     ]
     pending = [
         (part.name, part.stat().st_size)
         for part in parts
-        if existing.get(part.name) != part.stat().st_size
+        if not (
+            existing.get(part.name, {}).get("bytes") == part.stat().st_size
+            and existing.get(part.name, {}).get("sha256")
+            == local_path_metadata(part)["sha256"]
+        )
     ]
     progress(
         api,
@@ -285,8 +416,23 @@ def upload(api: Any, state: dict[str, Any]) -> None:
             f"mv -f {shlex.quote(assembled)} {shlex.quote(destination)}; "
         )
     command += f"rm -rf {shlex.quote(remote_stage)}"
-    api._remote_shell(session, command, timeout=1800)
+    finalization_error: Exception | None = None
+    try:
+        api._remote_shell(session, command, timeout=1800)
+    except Exception as exc:
+        finalization_error = exc
+    metadata = api._remote_path_metadata(session, destination)
+    if (
+        metadata.get("kind") != state["content_kind"]
+        or int(metadata.get("bytes", -1)) != int(state["content_bytes"])
+        or metadata.get("sha256") != state["content_sha256"]
+    ):
+        if finalization_error is not None:
+            raise finalization_error
+        raise RuntimeError("Remote destination failed content verification")
     state["sha256"] = digest.hexdigest()
+    state["verified"] = True
+    state["finalization_marker_missing"] = finalization_error is not None
 
 
 def download(api: Any, state: dict[str, Any]) -> None:
@@ -296,50 +442,98 @@ def download(api: Any, state: dict[str, Any]) -> None:
     destination = api._allowed_local_path(str(state["local_path"]), must_exist=False)
     root = directory(api, transfer_id)
     remote_stage = f"/content/.codex-remote/transfers/managed/{transfer_id}"
-    kind = api._remote_shell(
-        session,
-        f"test -d {shlex.quote(source)} && echo directory || (test -f {shlex.quote(source)} && echo file || exit 12)",
-        timeout=120,
-    ).stdout.strip()
+    content_metadata = api._remote_path_metadata(session, source)
+    previous_content_hash = state.get("content_sha256")
+    if previous_content_hash and previous_content_hash != content_metadata["sha256"]:
+        raise RuntimeError("The remote source changed while this transfer was paused")
+    # The metadata probe already determines the path kind.  Avoid a second
+    # shell-marker-dependent probe before starting the transfer.
+    kind = str(content_metadata["kind"])
     compress = bool(state.get("compress")) or kind == "directory"
     remote_payload = source
     if compress:
         remote_payload = f"{remote_stage}/payload.tar.gz"
+        try:
+            api._remote_shell(
+                session,
+                f"mkdir -p {shlex.quote(remote_stage)}/archive; cp -a {shlex.quote(source)} {shlex.quote(remote_stage)}/archive/payload; "
+                f"tar -czf {shlex.quote(remote_payload)} -C {shlex.quote(remote_stage)}/archive payload",
+                timeout=1800,
+            )
+        except Exception as exc:
+            if not shell_marker_missing(exc):
+                raise
+    metadata = api._remote_file_metadata(session, remote_payload)
+    state.update(
+        {
+            "bytes_total": int(metadata["bytes"]),
+            "compressed": compress,
+            "content_kind": content_metadata["kind"],
+            "content_bytes": int(content_metadata["bytes"]),
+            "content_sha256": content_metadata["sha256"],
+            "source_sha256": metadata["sha256"],
+        }
+    )
+    save_manifest(
+        root,
+        {
+            "payload_sha256": metadata["sha256"],
+            "payload_bytes": metadata["bytes"],
+            "chunk_size": api.TRANSFER_CHUNK_SIZE,
+            "content_kind": content_metadata["kind"],
+            "content_bytes": content_metadata["bytes"],
+            "content_sha256": content_metadata["sha256"],
+        },
+    )
+    try:
         api._remote_shell(
             session,
-            f"mkdir -p {shlex.quote(remote_stage)}/archive; cp -a {shlex.quote(source)} {shlex.quote(remote_stage)}/archive/payload; "
-            f"tar -czf {shlex.quote(remote_payload)} -C {shlex.quote(remote_stage)}/archive payload",
+            f"mkdir -p {shlex.quote(remote_stage)}/parts; split -b {api.TRANSFER_CHUNK_SIZE} -d -a 6 {shlex.quote(remote_payload)} {shlex.quote(remote_stage)}/parts/part-; "
+            f"test -e {shlex.quote(remote_stage)}/parts/part-000000 || : > {shlex.quote(remote_stage)}/parts/part-000000; "
+            f"find {shlex.quote(remote_stage)}/parts -maxdepth 1 -type f -name 'part-*' -printf '%f %s\\n' | sort",
             timeout=1800,
         )
-    metadata = api._remote_file_metadata(session, remote_payload)
-    state["bytes_total"] = int(metadata["bytes"])
-    state["compressed"] = compress
-    split = api._remote_shell(
-        session,
-        f"mkdir -p {shlex.quote(remote_stage)}/parts; split -b {api.TRANSFER_CHUNK_SIZE} -d -a 6 {shlex.quote(remote_payload)} {shlex.quote(remote_stage)}/parts/part-; "
-        f"test -e {shlex.quote(remote_stage)}/parts/part-000000 || : > {shlex.quote(remote_stage)}/parts/part-000000; "
-        f"find {shlex.quote(remote_stage)}/parts -maxdepth 1 -type f -name 'part-*' -printf '%f %s\\n' | sort",
-        timeout=1800,
+    except Exception as exc:
+        if not shell_marker_missing(exc):
+            raise
+    remote_info = remote_parts(api, session, remote_stage)
+    if not remote_info:
+        total_bytes = int(metadata["bytes"])
+        remote_info = {
+            f"part-{index:06d}": {
+                "bytes": min(api.TRANSFER_CHUNK_SIZE, total_bytes - index * api.TRANSFER_CHUNK_SIZE),
+                "sha256": "",
+            }
+            for index in range(
+                max(1, (total_bytes + api.TRANSFER_CHUNK_SIZE - 1) // api.TRANSFER_CHUNK_SIZE)
+            )
+        }
+    remote_part_list = sorted(
+        (name, int(details["bytes"]))
+        for name, details in remote_info.items()
+        if SAFE_PART.fullmatch(name)
     )
-    remote_parts = []
-    for line in split.stdout.splitlines():
-        name, _, size = line.partition(" ")
-        if SAFE_PART.fullmatch(name) and size.isdigit():
-            remote_parts.append((name, int(size)))
-    if not remote_parts:
+    if not remote_part_list:
         raise RuntimeError("Remote split produced no transfer parts")
-    state["chunks_total"] = len(remote_parts)
+    state["chunks_total"] = len(remote_part_list)
     parts_root = root / "parts"
     if parts_root.exists() and not state.get("resume", True):
         shutil.rmtree(parts_root)
     parts_root.mkdir(parents=True, exist_ok=True)
     completed = [
         (name, size)
-        for name, size in remote_parts
-        if (parts_root / name).is_file() and (parts_root / name).stat().st_size == size
+        for name, size in remote_part_list
+        if (
+            (parts_root / name).is_file()
+            and (parts_root / name).stat().st_size == size
+            and local_path_metadata(parts_root / name)["sha256"]
+            == remote_info[name]["sha256"]
+        )
     ]
     pending = [
-        (name, size) for name, size in remote_parts if (name, size) not in completed
+        (name, size)
+        for name, size in remote_part_list
+        if (name, size) not in completed
     ]
     progress(
         api,
@@ -368,7 +562,7 @@ def download(api: Any, state: dict[str, Any]) -> None:
     payload = root / ("payload.tar.gz" if compress else "payload")
     digest = hashlib.sha256()
     with payload.open("wb") as output:
-        for name, _ in remote_parts:
+        for name, _ in remote_part_list:
             with (parts_root / name).open("rb") as stream:
                 for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
                     output.write(block)
@@ -382,8 +576,21 @@ def download(api: Any, state: dict[str, Any]) -> None:
         if destination.exists() and not state.get("overwrite"):
             raise FileExistsError(f"Destination already exists: {destination}")
         os.replace(payload, destination)
-    api._remote_shell(session, f"rm -rf {shlex.quote(remote_stage)}", timeout=120)
+    finalization_error: Exception | None = None
+    try:
+        api._remote_shell(session, f"rm -rf {shlex.quote(remote_stage)}", timeout=120)
+    except Exception as exc:
+        finalization_error = exc
+    actual = local_path_metadata(destination)
+    if (
+        actual.get("kind") != state["content_kind"]
+        or int(actual.get("bytes", -1)) != int(state["content_bytes"])
+        or actual.get("sha256") != state["content_sha256"]
+    ):
+        raise RuntimeError("Downloaded destination failed content verification")
     state["sha256"] = digest.hexdigest()
+    state["verified"] = True
+    state["finalization_marker_missing"] = finalization_error is not None
 
 
 def run_worker(api: Any, transfer_id: str) -> None:
@@ -395,6 +602,8 @@ def run_worker(api: Any, transfer_id: str) -> None:
             upload(api, state)
         else:
             download(api, state)
+        if not state.get("verified"):
+            raise RuntimeError("Transfer finished without independent verification")
         progress(
             api,
             state,
