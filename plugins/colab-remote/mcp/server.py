@@ -48,6 +48,13 @@ DRIVE_MOUNTS_ROOT = STATE_ROOT / "drive-mounts"
 
 ACCELERATORS = {"cpu", "t4", "l4", "g4", "h100", "a100", "v5e-1", "v6e-1"}
 HIGH_RAM_REQUIRED_ACCELERATORS = {"l4", "g4", "h100", "v5e-1", "v6e-1"}
+HIGH_RAM_MIN_GIB = 20.0
+
+
+class _HighRamRequirementError(RuntimeError):
+    """The allocated runtime does not satisfy an explicit High-RAM request."""
+
+
 LANGUAGES = {"python", "julia", "r"}
 DIRECT_TRANSFER_LIMIT = 64 * 1024 * 1024
 TRANSFER_CHUNK_SIZE = 32 * 1024 * 1024
@@ -1599,6 +1606,10 @@ def _lease_session(session_name: str) -> None:
             },
         )
         if now >= expires_at:
+            latest = _load_session_ledger().get(session, {})
+            latest_expiry = latest.get("expires_at")
+            if isinstance(latest_expiry, int) and latest_expiry > now:
+                continue
             try:
                 stop_session(session, confirm=True)
                 _write_notification(
@@ -1630,6 +1641,8 @@ def _start_session_lease(session_name: str) -> dict[str, Any]:
         try:
             existing = json.loads(existing_path.read_text(encoding="utf-8"))
             if int(time.time()) - int(existing.get("heartbeat", 0)) < 120:
+                existing["expires_at"] = expires_at
+                _save_lease_record(session, existing)
                 return {"enabled": True, "already_running": True, **existing}
         except (OSError, ValueError, TypeError):
             pass
@@ -2218,6 +2231,108 @@ def _created_session_url(session_name: str) -> str:
     )
 
 
+def _actual_allocation(session_name: str) -> dict[str, Any]:
+    script = """python3 - <<'PY'
+import json, os, shutil, subprocess
+gpus=[]
+if shutil.which("nvidia-smi"):
+    result=subprocess.run(
+        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, check=False,
+    )
+    for line in result.stdout.splitlines():
+        if line.strip():
+            name, _, memory=line.partition(",")
+            gpus.append({"name":name.strip(),"memory_mb":memory.strip()})
+tpu_devices=[]
+for path in ("/dev/accel0", "/dev/accel1"):
+    if os.path.exists(path):
+        tpu_devices.append(path)
+print("CODEX_ALLOCATION="+json.dumps({"gpus":gpus,"tpu_devices":tpu_devices},separators=(",", ":")))
+PY"""
+    result = _remote_shell(session_name, script, timeout=120)
+    value = _extract_json_marker(result.stdout, "CODEX_ALLOCATION=")
+    gpus = value.get("gpus", []) if isinstance(value, dict) else []
+    tpu_devices = value.get("tpu_devices", []) if isinstance(value, dict) else []
+    if gpus:
+        actual = "gpu"
+    elif tpu_devices:
+        actual = "tpu"
+    else:
+        actual = "cpu"
+    return {"actual_type": actual, "gpus": gpus, "tpu_devices": tpu_devices}
+
+
+def _wait_until_ready_impl(
+    session_name: str,
+    *,
+    language: str,
+    timeout_seconds: int,
+    verify_kernel: bool,
+    require_high_ram: bool = False,
+) -> dict[str, Any]:
+    session = _validate_session_name(session_name)
+    deadline = time.monotonic() + max(1, min(timeout_seconds, 600))
+    attempts = 0
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        attempts += 1
+        try:
+            status = _output(_colab(["status", "-s", session], timeout=60))
+            terminal = _remote_shell(
+                session, "printf 'CODEX_TERMINAL_READY=1\\n'", timeout=60
+            )
+            if "CODEX_TERMINAL_READY=1" not in terminal.stdout:
+                raise RuntimeError("terminal health marker was missing")
+            kernel = (
+                _initialize_native_language(session, language)
+                if verify_kernel
+                else {"language": language, "verified": True}
+            )
+            memory = _memory_status(session)
+            allocation = _actual_allocation(session)
+            if require_high_ram and float(memory.get("gib", 0)) < HIGH_RAM_MIN_GIB:
+                raise _HighRamRequirementError(
+                    f"Allocated RAM is only {memory.get('gib', 'unknown')} GiB; "
+                    f"High-RAM requires at least {HIGH_RAM_MIN_GIB:g} GiB"
+                )
+            return {
+                "ready": True,
+                "attempts": attempts,
+                "status": status,
+                "terminal_ready": True,
+                "kernel_ready": True,
+                "kernel": kernel,
+                "memory": memory,
+                "allocation": allocation,
+            }
+        except Exception as exc:
+            if isinstance(exc, _HighRamRequirementError):
+                raise
+            last_error = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(3, max(0.5, deadline - time.monotonic())))
+    raise RuntimeError(f"Colab session did not become ready: {_redact(str(last_error))}")
+
+
+@mcp.tool()
+def wait_until_ready(
+    session_name: SessionName,
+    timeout_seconds: Annotated[
+        int, Field(description="Maximum health-check wait in seconds.", ge=1, le=600)
+    ] = 120,
+) -> dict[str, Any]:
+    """Wait until status, terminal, native kernel, RAM, and allocation probes pass."""
+    session = _validate_session_name(session_name)
+    return _wait_until_ready_impl(
+        session,
+        language=_session_language(session),
+        timeout_seconds=timeout_seconds,
+        verify_kernel=True,
+    )
+
+
 @mcp.tool()
 def create_session(
     session_name: SessionName,
@@ -2295,6 +2410,20 @@ def create_session(
             f"the session was stopped: {_redact(str(exc))}"
         ) from exc
     try:
+        readiness = _wait_until_ready_impl(
+            session,
+            language=selected_language,
+            timeout_seconds=180,
+            verify_kernel=False,
+            require_high_ram=selected_high_ram,
+        )
+    except Exception as exc:
+        _colab(["stop", "-s", session], timeout=120, check=False)
+        raise RuntimeError(
+            f"Colab allocated the VM, but readiness verification failed; "
+            f"the session was stopped: {_redact(str(exc))}"
+        ) from exc
+    try:
         _record_session(
             session,
             selected,
@@ -2309,25 +2438,9 @@ def create_session(
         warnings.append(
             f"Session was created, but local duration tracking failed: {_redact(str(exc))}"
         )
-    try:
-        status = _output(_colab(["status", "-s", session], timeout=60))
-    except Exception as exc:
-        status = {"available": False, "error": _redact(str(exc))}
-        warnings.append(
-            "Session was created, but its status probe failed. Use session_status to retry."
-        )
-    try:
-        memory = _memory_status(session)
-    except Exception as exc:
-        memory = {"available": False, "error": _redact(str(exc))}
-        warnings.append(
-            "Session was created, but RAM measurement failed. Use session_status to retry."
-        )
-    if selected_high_ram and memory.get("gib", 0) < 20:
-        measured = f" Allocated RAM is {memory['gib']} GiB." if "gib" in memory else ""
-        warnings.append(
-            f"Google accepted the request but did not provide a High-RAM VM.{measured}"
-        )
+    status = readiness["status"]
+    memory = readiness["memory"]
+    allocation = readiness["allocation"]
     try:
         compute = _session_compute_metadata(session)
     except Exception as exc:
@@ -2336,6 +2449,7 @@ def create_session(
             "exact_cost_available": False,
             "error": _redact(str(exc)),
         }
+    compute["allocation"] = allocation
     try:
         browser_url = _created_session_url(session)
     except Exception as exc:
@@ -2361,6 +2475,8 @@ def create_session(
         "concurrency": concurrency,
         "lease": lease,
         "memory": memory,
+        "allocation": allocation,
+        "readiness": readiness,
         "compute": compute,
         "session_url": browser_url,
         "session_url_presentation": "copy_paste_only",
@@ -2388,10 +2504,15 @@ def session_status(session_name: SessionName) -> dict[str, Any]:
     session = _validate_session_name(session_name)
     result = _colab(["status", "-s", session], timeout=60)
     ledger_record = _load_session_ledger().get(session, {})
+    try:
+        allocation = _actual_allocation(session)
+    except Exception as exc:
+        allocation = {"available": False, "error": _redact(str(exc))}
     return {
         **_output(result),
         "memory": _memory_status(session),
-        "compute": _session_compute_metadata(session),
+        "allocation": allocation,
+        "compute": {**_session_compute_metadata(session), "allocation": allocation},
         "lease": {
             "enabled": bool(ledger_record.get("expires_at")),
             "expires_at": ledger_record.get("expires_at"),
@@ -3579,22 +3700,90 @@ def load_notebook_from_drive(
     }
 
 
-def _remote_file_metadata(session_name: str, remote_path: str) -> dict[str, Any]:
+def _local_file_metadata(path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return {"kind": "file", "bytes": path.stat().st_size, "sha256": digest.hexdigest()}
+
+
+def _remote_path_metadata(session_name: str, remote_path: str) -> dict[str, Any]:
     source = _validate_remote_path(remote_path)
     script = f"""python3 - <<'PY'
 import hashlib, json
 from pathlib import Path
 p = Path({source!r})
-if not p.is_file():
-    raise SystemExit("remote path is not a file")
-h = hashlib.sha256()
-with p.open("rb") as stream:
-    for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
-        h.update(block)
-print("CODEX_FILE_METADATA=" + json.dumps({{"bytes": p.stat().st_size, "sha256": h.hexdigest()}}, separators=(",", ":")))
+if p.is_file():
+    h = hashlib.sha256()
+    with p.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            h.update(block)
+    value = {{"kind": "file", "bytes": p.stat().st_size, "sha256": h.hexdigest()}}
+elif p.is_dir():
+    h = hashlib.sha256()
+    total = 0
+    for child in sorted((item for item in p.rglob("*") if item.is_file()), key=lambda item: item.relative_to(p).as_posix()):
+        relative = child.relative_to(p).as_posix()
+        child_hash = hashlib.sha256()
+        with child.open("rb") as stream:
+            for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                child_hash.update(block)
+        size = child.stat().st_size
+        total += size
+        h.update(relative.encode() + b"\\0" + str(size).encode() + b"\\0" + child_hash.hexdigest().encode() + b"\\0")
+    value = {{"kind": "directory", "bytes": total, "sha256": h.hexdigest()}}
+else:
+    raise SystemExit("remote path does not exist")
+print("CODEX_PATH_METADATA=" + json.dumps(value, separators=(",", ":")))
 PY"""
-    result = _remote_shell(session_name, script, timeout=600)
-    return _extract_json_marker(result.stdout, "CODEX_FILE_METADATA=")
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            result = _remote_shell(session_name, script, timeout=600)
+            return _extract_json_marker(result.stdout, "CODEX_PATH_METADATA=")
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1 + attempt)
+    # Colab's interactive console can occasionally lose the shell completion
+    # marker even after the command completed.  Verify through the official
+    # download path as a separate channel instead of declaring a completed
+    # transfer failed solely because its shell marker was dropped.
+    try:
+        return _download_remote_path_metadata(session_name, source)
+    except Exception as fallback_error:
+        raise RuntimeError(
+            "Remote metadata probe failed after three attempts: "
+            f"{last_error}; download verification also failed: {fallback_error}"
+        ) from fallback_error
+
+
+def _download_remote_path_metadata(session_name: str, remote_path: str) -> dict[str, Any]:
+    """Verify a remote path by downloading it through the official CLI."""
+    nonce = secrets.token_hex(12)
+    stage = TRANSFERS_ROOT / f"metadata-{nonce}"
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _colab(
+            ["download", "-s", session_name, remote_path, _wsl_path(stage)],
+            timeout=1800,
+        )
+        if not stage.exists():
+            raise RuntimeError("Colab download verification produced no local path")
+        return managed_transfer.local_path_metadata(stage)
+    finally:
+        if stage.is_dir():
+            shutil.rmtree(stage, ignore_errors=True)
+        else:
+            stage.unlink(missing_ok=True)
+
+
+def _remote_file_metadata(session_name: str, remote_path: str) -> dict[str, Any]:
+    metadata = _remote_path_metadata(session_name, remote_path)
+    if metadata.get("kind") != "file":
+        raise RuntimeError("remote path is not a file")
+    return metadata
 
 
 def _transfer_stage(nonce: str) -> Path:
@@ -3616,15 +3805,23 @@ def upload_file(
     destination = _validate_remote_path(remote_path)
     session = _validate_session_name(session_name)
     size = source.stat().st_size
+    local_metadata = _local_file_metadata(source)
     if size <= DIRECT_TRANSFER_LIMIT:
         result = _colab(
             ["upload", "-s", session, _wsl_path(source), destination], timeout=1800
         )
+        remote_metadata = _remote_file_metadata(session, destination)
+        if remote_metadata != local_metadata:
+            raise RuntimeError(
+                "Uploaded file failed remote size/SHA-256 verification"
+            )
         return {
             "local_path": str(source),
             "remote_path": destination,
             "transfer_mode": "direct",
             "bytes": size,
+            "sha256": local_metadata["sha256"],
+            "verified": True,
             **_output(result),
         }
 
@@ -3657,18 +3854,23 @@ def upload_file(
                 chunks += 1
         expected_hash = digest.hexdigest()
         temporary = f"{destination}.codex-{nonce}.part"
-        _remote_shell(
-            session,
+        finalization = (
             "set -euo pipefail; "
             f"mkdir -p {shlex.quote(destination.rsplit('/', 1)[0] or '/')}; "
             f"cat {shlex.quote(remote_stage)}/part-* > {shlex.quote(temporary)}; "
             f"test \"$(sha256sum {shlex.quote(temporary)} | cut -d' ' -f1)\" = {shlex.quote(expected_hash)}; "
             f"mv -f {shlex.quote(temporary)} {shlex.quote(destination)}; "
-            f"rm -rf {shlex.quote(remote_stage)}",
-            timeout=1800,
+            f"rm -rf {shlex.quote(remote_stage)}"
         )
+        finalization_error: Exception | None = None
+        try:
+            _remote_shell(session, finalization, timeout=1800)
+        except Exception as exc:
+            finalization_error = exc
         metadata = _remote_file_metadata(session, destination)
         if metadata.get("bytes") != size or metadata.get("sha256") != expected_hash:
+            if finalization_error is not None:
+                raise finalization_error
             raise RuntimeError(
                 "Remote file checksum or size did not match after chunked upload"
             )
@@ -3680,6 +3882,7 @@ def upload_file(
             "chunks": chunks,
             "chunk_bytes": TRANSFER_CHUNK_SIZE,
             "sha256": expected_hash,
+            "verified": True,
             "exit_code": 0,
             "stdout": f"Uploaded {size} bytes in {chunks} verified chunks.\n",
             "stderr": "",
@@ -3704,14 +3907,29 @@ def download_file(
     metadata = _remote_file_metadata(session, source)
     size = int(metadata["bytes"])
     if size <= DIRECT_TRANSFER_LIMIT:
-        result = _colab(
-            ["download", "-s", session, source, _wsl_path(destination)], timeout=1800
+        temporary = destination.with_name(
+            f".{destination.name}.{secrets.token_hex(8)}.part"
         )
+        try:
+            result = _colab(
+                ["download", "-s", session, source, _wsl_path(temporary)],
+                timeout=1800,
+            )
+            local_metadata = _local_file_metadata(temporary)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        if local_metadata != metadata:
+            temporary.unlink(missing_ok=True)
+            raise RuntimeError("Downloaded file failed local size/SHA-256 verification")
+        os.replace(temporary, destination)
         return {
             "remote_path": source,
             "local_path": str(destination),
             "transfer_mode": "direct",
             "bytes": size,
+            "sha256": metadata["sha256"],
+            "verified": True,
             **_output(result),
         }
 
@@ -3720,19 +3938,30 @@ def download_file(
     remote_stage = f"/content/.codex-remote/transfers/{nonce}"
     temporary = destination.with_name(f".{destination.name}.{nonce}.part")
     try:
-        result = _remote_shell(
-            session,
-            "set -euo pipefail; "
-            f"mkdir -p {shlex.quote(remote_stage)}; "
-            f"split -b {TRANSFER_CHUNK_SIZE} -d -a 6 {shlex.quote(source)} {shlex.quote(remote_stage)}/part-; "
-            f"find {shlex.quote(remote_stage)} -maxdepth 1 -type f -name 'part-*' -printf '%f\\n' | sort",
-            timeout=1800,
-        )
-        part_names = [
-            line.strip()
-            for line in result.stdout.splitlines()
-            if SAFE_NAME.fullmatch(line.strip())
-        ]
+        try:
+            result = _remote_shell(
+                session,
+                "set -euo pipefail; "
+                f"mkdir -p {shlex.quote(remote_stage)}; "
+                f"split -b {TRANSFER_CHUNK_SIZE} -d -a 6 {shlex.quote(source)} {shlex.quote(remote_stage)}/part-; "
+                f"test -e {shlex.quote(remote_stage)}/part-000000 || : > {shlex.quote(remote_stage)}/part-000000; "
+                f"find {shlex.quote(remote_stage)} -maxdepth 1 -type f -name 'part-*' -printf '%f\\n' | sort",
+                timeout=1800,
+            )
+            part_names = [
+                line.strip()
+                for line in result.stdout.splitlines()
+                if SAFE_NAME.fullmatch(line.strip())
+            ]
+        except Exception as exc:
+            if "CODEX_REMOTE_SHELL=" not in str(exc):
+                raise
+            part_names = [
+                f"part-{index:06d}"
+                for index in range(
+                    max(1, (size + TRANSFER_CHUNK_SIZE - 1) // TRANSFER_CHUNK_SIZE)
+                )
+            ]
         if not part_names:
             raise RuntimeError("Remote file split did not produce any chunks")
         for part_name in part_names:
@@ -3767,6 +3996,7 @@ def download_file(
             "chunks": len(part_names),
             "chunk_bytes": TRANSFER_CHUNK_SIZE,
             "sha256": metadata["sha256"],
+            "verified": True,
             "exit_code": 0,
             "stdout": f"Downloaded {size} bytes in {len(part_names)} verified chunks.\n",
             "stderr": "",
@@ -3817,6 +4047,7 @@ def start_upload(
             "created_at": int(time.time()),
             "bytes_done": 0,
             "chunks_done": 0,
+            "verified": False,
         },
     )
 
@@ -3862,6 +4093,7 @@ def start_download(
             "created_at": int(time.time()),
             "bytes_done": 0,
             "chunks_done": 0,
+            "verified": False,
         },
     )
 

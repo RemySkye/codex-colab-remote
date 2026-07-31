@@ -115,12 +115,12 @@ Codex should run local readiness checks and explain the compute warning before a
 
 ## LLM tool surface
 
-The plugin exposes 59 MCP tools. Every session operation uses a `session_name`, which lets Codex safely manage multiple runtimes at once.
+The plugin exposes 60 MCP tools. Every session operation uses a `session_name`, which lets Codex safely manage multiple runtimes at once.
 
 | Area | Tools | What Codex can do |
 |---|---|---|
 | Setup and configuration | `authentication_instructions`, `credential_status`, `doctor`, `get_config`, `set_config` | Check prerequisites, guide OAuth, inspect preferences, and make validated changes |
-| Sessions and runtimes | `create_session`, `list_sessions`, `session_status`, `session_url`, `set_session_lifetime`, `prepare_language`, `restart_kernel`, `stop_session` | Allocate named runtimes, select hardware/language/RAM/version, inspect them, limit lifetime, and release compute |
+| Sessions and runtimes | `create_session`, `list_sessions`, `session_status`, `session_url`, `wait_until_ready`, `set_session_lifetime`, `prepare_language`, `restart_kernel`, `stop_session` | Allocate named runtimes, wait for status/terminal/kernel/health probes, select hardware/language/RAM/version, inspect them, limit lifetime, and release compute |
 | Code and terminal | `execute_code`, `execute_file`, `terminal_exec`, `install_packages` | Run Python/R/Julia, execute approved local source files, use the Linux shell, and install packages |
 | Long jobs | `start_job`, `job_status`, `job_logs`, `get_logs`, `watch_job`, `stop_job` | Run persistent work, monitor progress, retrieve logs, receive configured completion notifications, and stop jobs |
 | Local secret aliases | `prepare_local_secret`, `list_local_secrets`, `enable_local_secrets`, `disable_local_secrets` | Ask the user to add a masked credential locally, see names only, and grant/revoke selected aliases per session |
@@ -132,6 +132,10 @@ The plugin exposes 59 MCP tools. Every session operation uses a `session_name`, 
 | Notifications | `notification_history`, `test_notification` | Inspect notification history or test the selected notification mode |
 
 Destructive and expensive operations retain explicit safeguards. For example, Drive deletion and session shutdown require confirmation, while session allocation approval can be changed only through an explicit configuration choice.
+
+File transfers report `verified: true` only after size and SHA-256 verification. Managed transfers keep a manifest and verify every completed chunk by hash, so an interrupted transfer can resume safely; a changed local or remote source starts a new transfer instead of reusing stale chunks. A missing shell completion marker is treated as recoverable when the destination's content hash verifies.
+
+`create_session` and `wait_until_ready` verify Colab status, a live terminal probe, memory, and the actual GPU/TPU allocation. A High-RAM request is rejected if the allocated memory is below the required threshold, and the runtime is stopped when creation cannot satisfy readiness.
 
 ## Configuration
 
