@@ -131,6 +131,8 @@ The plugin exposes 60 MCP tools. Every session operation uses a `session_name`, 
 | Recovery | `recovery_status`, `recover_session` | Inspect recovery metadata and explicitly recreate opted-in work after a lost runtime |
 | Notifications | `notification_history`, `test_notification` | Inspect notification history or test the selected notification mode |
 
+G4, L4, H100, v5e-1, and v6e-1 are requested as native High-RAM accelerators. The compatibility layer intentionally omits the legacy `shape=hm` query for these accelerator types because Colab's current assignment API rejects that extra override; CPU and standard GPU High-RAM requests still use the High-RAM shape option.
+
 Destructive and expensive operations retain explicit safeguards. For example, Drive deletion and session shutdown require confirmation, while session allocation approval can be changed only through an explicit configuration choice.
 
 File transfers report `verified: true` only after size and SHA-256 verification. Managed transfers keep a manifest and verify every completed chunk by hash, so an interrupted transfer can resume safely; a changed local or remote source starts a new transfer instead of reusing stale chunks. A missing shell completion marker is treated as recoverable when the destination's content hash verifies.

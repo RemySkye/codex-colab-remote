@@ -801,9 +801,10 @@ def _colab(
         runtime_language = runtime_language.strip().lower()
         if runtime_language not in LANGUAGES:
             raise ValueError(f"runtime_language must be one of {sorted(LANGUAGES)}")
-    if machine_shape or runtime_version or runtime_language:
-        if machine_shape:
-            command.append(f"COLAB_REMOTE_MACHINE_SHAPE={machine_shape}")
+    effective_machine_shape = _machine_shape_for_arguments(machine_shape, arguments)
+    if effective_machine_shape or runtime_version or runtime_language:
+        if effective_machine_shape:
+            command.append(f"COLAB_REMOTE_MACHINE_SHAPE={effective_machine_shape}")
         if runtime_version:
             command.append(f"COLAB_REMOTE_RUNTIME_VERSION={runtime_version}")
         if runtime_language:
@@ -850,6 +851,24 @@ def _colab(
                 raise
             time.sleep(min(2 ** (attempt - 1), 4))
     raise AssertionError("unreachable")
+
+
+def _machine_shape_for_arguments(
+    machine_shape: str | None, arguments: list[str]
+) -> str | None:
+    """Avoid the legacy shape query for accelerators that imply High-RAM."""
+    if machine_shape != "hm":
+        return machine_shape
+    for index, argument in enumerate(arguments[:-1]):
+        if argument not in {"--gpu", "--tpu"}:
+            continue
+        try:
+            accelerator = _normalize_accelerator(arguments[index + 1])
+        except ValueError:
+            continue
+        if accelerator in HIGH_RAM_REQUIRED_ACCELERATORS:
+            return None
+    return machine_shape
 
 
 def _output(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
