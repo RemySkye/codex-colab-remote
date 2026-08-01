@@ -935,6 +935,24 @@ class ServerTests(unittest.TestCase):
         self.assertIn("COLAB_REMOTE_LANGUAGE=julia", command)
         self.assertIn("/plugin/scripts/colab_compat.py", command)
 
+    def test_required_high_ram_accelerator_omits_legacy_shape_override(self):
+        for accelerator, flag, cli_value in (
+            ("g4", "--gpu", "G4"),
+            ("l4", "--gpu", "L4"),
+            ("h100", "--gpu", "H100"),
+            ("v5e-1", "--tpu", "v5e1"),
+            ("v6e-1", "--tpu", "v6e1"),
+        ):
+            with self.subTest(accelerator=accelerator):
+                self.assertIsNone(
+                    server._machine_shape_for_arguments(
+                        "hm", ["new", "-s", accelerator, flag, cli_value]
+                    )
+                )
+        self.assertEqual(
+            server._machine_shape_for_arguments("hm", ["new", "-s", "cpu"]), "hm"
+        )
+
     def test_create_stops_session_when_readiness_probe_fails(self):
         with (
             patch.object(

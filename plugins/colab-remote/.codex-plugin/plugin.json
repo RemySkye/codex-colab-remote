@@ -1,6 +1,6 @@
 {
   "name": "colab-remote",
-  "version": "0.7.1+codex.20260726133533",
+  "version": "0.7.1+codex.20260801051721",
   "description": "Operate Colab compute, notebooks, resumable files, and recoverable jobs through the official CLI.",
   "author": {
     "name": "RemySkye",
